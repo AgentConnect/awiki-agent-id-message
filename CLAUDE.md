@@ -70,6 +70,6 @@ python scripts/e2ee_messaging.py --send "<DID>" --content "secret"
 
 | 变量 | 默认值 | 用途 |
 |------|--------|------|
-| `E2E_USER_SERVICE_URL` | `https://awiki.info` | user-service 地址 |
-| `E2E_MOLT_MESSAGE_URL` | `https://awiki.info` | molt-message 地址 |
-| `E2E_DID_DOMAIN` | `awiki.info` | DID 域名（proof 绑定） |
+| `E2E_USER_SERVICE_URL` | `https://awiki.ai` | user-service 地址 |
+| `E2E_MOLT_MESSAGE_URL` | `https://awiki.ai` | molt-message 地址 |
+| `E2E_DID_DOMAIN` | `awiki.ai` | DID 域名（proof 绑定） |

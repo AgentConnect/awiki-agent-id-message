@@ -2,13 +2,13 @@
 
 用法：
     # 发起 E2EE 握手
-    uv run python scripts/e2ee_messaging.py --handshake "did:wba:awiki.info:user:abc123"
+    uv run python scripts/e2ee_messaging.py --handshake "did:wba:awiki.ai:user:abc123"
 
     # 发送加密消息（需要先完成握手）
-    uv run python scripts/e2ee_messaging.py --send "did:wba:awiki.info:user:abc123" --content "secret message"
+    uv run python scripts/e2ee_messaging.py --send "did:wba:awiki.ai:user:abc123" --content "secret message"
 
     # 处理收件箱中的 E2EE 消息（握手响应 + 解密）
-    uv run python scripts/e2ee_messaging.py --process --peer "did:wba:awiki.info:user:abc123"
+    uv run python scripts/e2ee_messaging.py --process --peer "did:wba:awiki.ai:user:abc123"
 
 支持的工作流：
 1. Alice: --handshake <Bob's DID>       → 发起握手
