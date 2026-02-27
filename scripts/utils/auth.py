@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import secrets
 from typing import Any
 
 import httpx
@@ -139,7 +138,6 @@ async def get_jwt_via_wba(
 async def create_authenticated_identity(
     client: httpx.AsyncClient,
     config: SDKConfig,
-    unique_id: str | None = None,
     name: str | None = None,
     is_public: bool = False,
     is_agent: bool = False,
@@ -149,10 +147,12 @@ async def create_authenticated_identity(
 ) -> DIDIdentity:
     """一站式创建完整 DID 身份（生成密钥 → 注册 → 获取 JWT）。
 
+    使用 key-bound DID：公钥 fingerprint 自动成为 DID 路径末段（k1_{fp}），
+    无需手动指定 unique_id。path_prefix 固定为 ["user"]（服务端要求）。
+
     Args:
         client: 指向 user-service 的 HTTP 客户端
         config: SDK 配置
-        unique_id: 用户唯一标识（默认随机生成）
         name: 显示名称
         is_public: 是否公开
         is_agent: 是否为 AI Agent
@@ -163,13 +163,11 @@ async def create_authenticated_identity(
     Returns:
         填充了 user_id 和 jwt_token 的 DIDIdentity
     """
-    if unique_id is None:
-        unique_id = f"test_{secrets.token_hex(8)}"
-
-    # 1. 创建 DID 身份（含 authentication proof，绑定到服务域名）
+    # 1. 创建 key-bound DID 身份（含 authentication proof，绑定到服务域名）
+    #    path_prefix 固定 ["user"]：服务端要求 DID 格式为 did:wba:{domain}:user:{id}
     identity = create_identity(
         hostname=config.did_domain,
-        path_segments=["user", unique_id],
+        path_prefix=["user"],
         proof_purpose="authentication",
         domain=config.did_domain,
         services=services,

@@ -95,8 +95,7 @@ GET /user-service/user/{unique_id}/did.json
 
 ## 认证流程
 
-1. 生成 secp256k1 密钥对
-2. 使用 ANP `create_did_wba_document()` 创建 DID 文档（含 proof）
+1. 使用 ANP `create_did_wba_document_with_key_binding()` 生成 secp256k1 密钥对 + key-bound DID 文档（含 proof）
 3. 调用 `register` 注册 DID
 4. 使用 ANP `generate_auth_header()` 生成 WBA 签名
 5. 调用 `verify` 获取 JWT

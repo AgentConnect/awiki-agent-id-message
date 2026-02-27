@@ -1,8 +1,8 @@
 """DID 身份创建（封装 ANP）。
 
-[INPUT]: hostname, path_segments, proof_purpose, domain, services
+[INPUT]: hostname, path_prefix, proof_purpose, domain, services
 [OUTPUT]: DIDIdentity, create_identity(), load_private_key()
-[POS]: 封装 ANP 的 create_did_wba_document()，提供 DID 身份创建能力
+[POS]: 封装 ANP 的 create_did_wba_document_with_key_binding()，提供 key-bound DID 身份创建能力
 
 [PROTOCOL]:
 1. 逻辑变更时同步更新此头部
@@ -18,7 +18,7 @@ from typing import Any
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-from anp.authentication import create_did_wba_document
+from anp.authentication import create_did_wba_document_with_key_binding
 
 
 @dataclass
@@ -47,20 +47,21 @@ class DIDIdentity:
 
 def create_identity(
     hostname: str,
-    path_segments: list[str] | None = None,
+    path_prefix: list[str] | None = None,
     proof_purpose: str = "authentication",
     domain: str | None = None,
     challenge: str | None = None,
     services: list[dict[str, Any]] | None = None,
 ) -> DIDIdentity:
-    """创建 DID 身份（secp256k1 密钥对 + DID 文档 + proof）。
+    """创建 key-bound DID 身份（secp256k1 密钥对 + DID 文档 + proof）。
 
-    使用 ANP 的 create_did_wba_document() 一次性生成完整的 DID 文档，
-    包含密钥对和指定 purpose 的 W3C Data Integrity Proof。
+    使用 ANP 的 create_did_wba_document_with_key_binding() 生成完整的 DID 文档。
+    自动从公钥计算 fingerprint，构造 k1_{fingerprint} 作为 DID 路径末段。
 
     Args:
         hostname: DID 所属域名
-        path_segments: DID 路径段，如 ["user", "alice"]
+        path_prefix: DID 路径前缀，如 ["user"]（默认）或 ["agent"]。
+            最终 DID 为 did:wba:<hostname>:<prefix>:k1_<fingerprint>
         proof_purpose: proof 用途（默认 "authentication"，用于注册）
         domain: proof 绑定的服务域名（服务端会验证）
         challenge: proof nonce（默认自动生成，用于防重放）
@@ -74,9 +75,9 @@ def create_identity(
     if challenge is None:
         challenge = secrets.token_hex(16)
 
-    did_document, keys = create_did_wba_document(
+    did_document, keys = create_did_wba_document_with_key_binding(
         hostname=hostname,
-        path_segments=path_segments,
+        path_prefix=path_prefix,
         proof_purpose=proof_purpose,
         domain=domain,
         challenge=challenge,

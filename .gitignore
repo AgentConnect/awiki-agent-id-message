@@ -1,3 +1,6 @@
+# Credentials (private keys, JWT tokens)
+.credentials/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
