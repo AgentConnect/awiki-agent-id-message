@@ -127,7 +127,9 @@ async def authenticated_rpc_call(
     resp.raise_for_status()
 
     # 成功：从响应头缓存新 token
-    new_token = auth.update_token(server_url, dict(resp.headers))
+    # 注意：httpx 响应头 key 为小写，DIDWbaAuthHeader.update_token() 期望 "Authorization"
+    auth_header_value = resp.headers.get("authorization", "")
+    new_token = auth.update_token(server_url, {"Authorization": auth_header_value})
     if new_token:
         from credential_store import update_jwt
         update_jwt(credential_name, new_token)
