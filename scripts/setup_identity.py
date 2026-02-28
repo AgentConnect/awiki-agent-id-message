@@ -15,7 +15,7 @@
     # 删除已保存的身份
     uv run python scripts/setup_identity.py --delete myid
 
-[INPUT]: SDK（身份创建、注册、认证）、credential_store（凭证持久化）
+[INPUT]: SDK（身份创建、注册、认证）、credential_store（凭证持久化 + authenticator 工厂）
 [OUTPUT]: 创建/加载/列出/删除 DID 身份
 [POS]: 身份管理入口脚本，首次使用前必须调用
 
@@ -37,6 +37,7 @@ from utils import (
     register_did,
     get_jwt_via_wba,
     create_authenticated_identity,
+    authenticated_rpc_call,
     rpc_call,
 )
 from credential_store import (
@@ -45,6 +46,7 @@ from credential_store import (
     list_identities,
     delete_identity,
     update_jwt,
+    create_authenticator,
 )
 
 
@@ -84,6 +86,7 @@ async def create_new_identity(
             jwt_token=identity.jwt_token,
             display_name=display_name or name,
             name=credential_name,
+            did_document=identity.did_document,
         )
         print(f"\n凭证已保存到: {path}")
         print(f"凭证名称: {credential_name}")
@@ -104,8 +107,30 @@ async def load_saved_identity(credential_name: str = "default") -> None:
     print(f"  创建时间  : {data.get('created_at', 'N/A')}")
 
     # 验证 JWT 是否仍然有效
-    if data.get("jwt_token"):
-        config = SDKConfig()
+    if not data.get("jwt_token"):
+        print("\n  未保存 JWT token")
+        return
+
+    config = SDKConfig()
+
+    # 尝试使用 DIDWbaAuthHeader 自动处理认证
+    auth_result = create_authenticator(credential_name, config)
+    if auth_result is not None:
+        auth, _ = auth_result
+        async with create_user_service_client(config) as client:
+            try:
+                me = await authenticated_rpc_call(
+                    client, "/user-service/did-auth/rpc", "get_me",
+                    auth=auth, credential_name=credential_name,
+                )
+                print(f"\n  JWT 验证成功! 当前身份:")
+                print(f"    DID: {me.get('did', 'N/A')}")
+                print(f"    名称: {me.get('name', 'N/A')}")
+            except Exception as e:
+                print(f"\n  JWT 验证/刷新失败: {e}")
+                print("  可能需要重新创建身份")
+    else:
+        # 旧凭证没有 did_document，回退到直接验证
         async with create_user_service_client(config) as client:
             client.headers["Authorization"] = f"Bearer {data['jwt_token']}"
             try:
@@ -114,35 +139,8 @@ async def load_saved_identity(credential_name: str = "default") -> None:
                 print(f"    DID: {me.get('did', 'N/A')}")
                 print(f"    名称: {me.get('name', 'N/A')}")
             except Exception:
-                print(f"\n  JWT 已过期，正在重新获取...")
-                try:
-                    from utils.identity import DIDIdentity, load_private_key
-
-                    private_key_pem = data["private_key_pem"]
-                    if isinstance(private_key_pem, str):
-                        private_key_pem = private_key_pem.encode("utf-8")
-
-                    public_key_pem = data["public_key_pem"]
-                    if isinstance(public_key_pem, str):
-                        public_key_pem = public_key_pem.encode("utf-8")
-
-                    identity = DIDIdentity(
-                        did=data["did"],
-                        did_document={},  # 不需要完整文档来获取 JWT
-                        private_key_pem=private_key_pem,
-                        public_key_pem=public_key_pem,
-                        user_id=data.get("user_id"),
-                    )
-                    new_token = await get_jwt_via_wba(
-                        client, identity, config.did_domain
-                    )
-                    update_jwt(credential_name, new_token)
-                    print(f"  新 JWT 已获取并保存: {new_token[:50]}...")
-                except Exception as e:
-                    print(f"  重新获取 JWT 失败: {e}")
-                    print("  可能需要重新创建身份")
-    else:
-        print("\n  未保存 JWT token")
+                print("\n  JWT 已过期，请重新创建身份以启用自动刷新:")
+                print(f"    python scripts/setup_identity.py --name \"{data.get('name', 'MyAgent')}\" --credential {credential_name}")
 
 
 def show_identities() -> None:

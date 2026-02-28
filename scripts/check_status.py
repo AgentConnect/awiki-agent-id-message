@@ -5,7 +5,7 @@
     python scripts/check_status.py --auto-e2ee         # 含 E2EE 自动处理
     python scripts/check_status.py --credential alice   # 指定凭证
 
-[INPUT]: SDK（RPC 调用、E2eeClient）、credential_store、e2ee_store
+[INPUT]: SDK（RPC 调用、E2eeClient）、credential_store（authenticator 工厂）、e2ee_store
 [OUTPUT]: 结构化 JSON 状态报告（identity + inbox + e2ee_auto + e2ee_sessions）
 [POS]: 统一状态检查入口，供 Agent 会话启动和心跳调用
 
@@ -26,11 +26,9 @@ from utils import (
     E2eeClient,
     create_user_service_client,
     create_molt_message_client,
-    get_jwt_via_wba,
-    rpc_call,
+    authenticated_rpc_call,
 )
-from utils.identity import DIDIdentity
-from credential_store import load_identity, update_jwt
+from credential_store import load_identity, create_authenticator
 from e2ee_store import load_e2ee_state, save_e2ee_state
 
 
@@ -62,11 +60,11 @@ def _save_e2ee_client(client: E2eeClient, credential_name: str) -> None:
     save_e2ee_state(client.export_state(), credential_name)
 
 
-async def _send_msg(http_client, sender_did, receiver_did, msg_type, content):
+async def _send_msg(http_client, sender_did, receiver_did, msg_type, content, *, auth, credential_name="default"):
     """发送消息（E2EE 或普通消息）。"""
     if isinstance(content, dict):
         content = json.dumps(content)
-    return await rpc_call(
+    return await authenticated_rpc_call(
         http_client, MESSAGE_RPC, "send",
         params={
             "sender_did": sender_did,
@@ -74,6 +72,8 @@ async def _send_msg(http_client, sender_did, receiver_did, msg_type, content):
             "content": content,
             "type": msg_type,
         },
+        auth=auth,
+        credential_name=credential_name,
     )
 
 
@@ -97,35 +97,29 @@ async def check_identity(credential_name: str = "default") -> dict[str, Any]:
         return result
 
     config = SDKConfig()
-    async with create_user_service_client(config) as client:
-        client.headers["Authorization"] = f"Bearer {data['jwt_token']}"
-        try:
-            await rpc_call(client, AUTH_RPC, "get_me")
-            result["jwt_valid"] = True
-        except Exception:
-            # JWT 过期，尝试刷新
-            try:
-                private_key_pem = data["private_key_pem"]
-                if isinstance(private_key_pem, str):
-                    private_key_pem = private_key_pem.encode("utf-8")
-                public_key_pem = data["public_key_pem"]
-                if isinstance(public_key_pem, str):
-                    public_key_pem = public_key_pem.encode("utf-8")
+    auth_result = create_authenticator(credential_name, config)
+    if auth_result is None:
+        result["status"] = "no_did_document"
+        result["error"] = "凭证缺少 DID 文档，请重新创建身份"
+        return result
 
-                identity = DIDIdentity(
-                    did=data["did"],
-                    did_document={},
-                    private_key_pem=private_key_pem,
-                    public_key_pem=public_key_pem,
-                    user_id=data.get("user_id"),
-                )
-                new_token = await get_jwt_via_wba(client, identity, config.did_domain)
-                update_jwt(credential_name, new_token)
-                result["jwt_valid"] = True
+    auth, _ = auth_result
+    old_token = data["jwt_token"]
+
+    try:
+        async with create_user_service_client(config) as client:
+            await authenticated_rpc_call(
+                client, AUTH_RPC, "get_me",
+                auth=auth, credential_name=credential_name,
+            )
+            result["jwt_valid"] = True
+            # 检查 token 是否被刷新（authenticated_rpc_call 会自动持久化新 JWT）
+            refreshed_data = load_identity(credential_name)
+            if refreshed_data and refreshed_data.get("jwt_token") != old_token:
                 result["jwt_refreshed"] = True
-            except Exception as e:
-                result["status"] = "jwt_refresh_failed"
-                result["error"] = str(e)
+    except Exception as e:
+        result["status"] = "jwt_refresh_failed"
+        result["error"] = str(e)
 
     return result
 
@@ -134,17 +128,18 @@ async def summarize_inbox(
     credential_name: str = "default",
 ) -> dict[str, Any]:
     """获取收件箱并分类统计。"""
-    data = load_identity(credential_name)
-    if data is None:
+    config = SDKConfig()
+    auth_result = create_authenticator(credential_name, config)
+    if auth_result is None:
         return {"status": "no_identity", "total": 0}
 
-    config = SDKConfig()
+    auth, data = auth_result
     try:
         async with create_molt_message_client(config) as client:
-            client.headers["Authorization"] = f"Bearer {data['jwt_token']}"
-            inbox = await rpc_call(
+            inbox = await authenticated_rpc_call(
                 client, MESSAGE_RPC, "get_inbox",
                 params={"user_did": data["did"], "limit": 50},
+                auth=auth, credential_name=credential_name,
             )
     except Exception as e:
         return {"status": "error", "error": str(e), "total": 0}
@@ -198,19 +193,19 @@ async def auto_process_e2ee(
 
     关键改进：响应路由到 msg.sender_did，支持来自任意 peer 的握手。
     """
-    data = load_identity(credential_name)
-    if data is None:
+    config = SDKConfig()
+    auth_result = create_authenticator(credential_name, config)
+    if auth_result is None:
         return {"status": "no_identity", "processed": 0, "details": []}
 
-    config = SDKConfig()
+    auth, data = auth_result
     try:
         async with create_molt_message_client(config) as client:
-            client.headers["Authorization"] = f"Bearer {data['jwt_token']}"
-
             # 获取收件箱
-            inbox = await rpc_call(
+            inbox = await authenticated_rpc_call(
                 client, MESSAGE_RPC, "get_inbox",
                 params={"user_did": data["did"], "limit": 50},
+                auth=auth, credential_name=credential_name,
             )
             messages = inbox.get("messages", [])
 
@@ -243,7 +238,8 @@ async def auto_process_e2ee(
                     # 响应路由到 sender_did（而非固定 peer）
                     for resp_type, resp_content in responses:
                         await _send_msg(
-                            client, data["did"], sender_did, resp_type, resp_content
+                            client, data["did"], sender_did, resp_type, resp_content,
+                            auth=auth, credential_name=credential_name,
                         )
 
                     details.append({
@@ -261,9 +257,10 @@ async def auto_process_e2ee(
 
             # 标记已处理的消息为已读
             if processed_ids:
-                await rpc_call(
+                await authenticated_rpc_call(
                     client, MESSAGE_RPC, "mark_read",
                     params={"user_did": data["did"], "message_ids": processed_ids},
+                    auth=auth, credential_name=credential_name,
                 )
 
             # 保存 E2EE 状态

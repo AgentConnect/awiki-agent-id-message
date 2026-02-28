@@ -20,7 +20,7 @@ from utils.auth import (
 )
 from utils.client import create_user_service_client, create_molt_message_client
 from utils.e2ee import E2eeClient
-from utils.rpc import JsonRpcError, rpc_call
+from utils.rpc import JsonRpcError, rpc_call, authenticated_rpc_call
 
 __all__ = [
     # config
@@ -42,4 +42,5 @@ __all__ = [
     # rpc
     "JsonRpcError",
     "rpc_call",
+    "authenticated_rpc_call",
 ]

@@ -28,8 +28,8 @@ import json
 import sys
 from pathlib import Path
 
-from utils import SDKConfig, create_user_service_client, rpc_call
-from credential_store import load_identity
+from utils import SDKConfig, create_user_service_client, authenticated_rpc_call
+from credential_store import create_authenticator
 
 
 RPC_ENDPOINT = "/user-service/did/relationships/rpc"
@@ -43,11 +43,6 @@ async def create_group(
     credential_name: str = "default",
 ) -> None:
     """创建群组。"""
-    data = load_identity(credential_name)
-    if data is None:
-        print(f"未找到凭证 '{credential_name}'，请先创建身份")
-        sys.exit(1)
-
     params: dict = {
         "name": group_name,
         "max_members": max_members,
@@ -57,9 +52,17 @@ async def create_group(
         params["description"] = description
 
     config = SDKConfig()
+    auth_result = create_authenticator(credential_name, config)
+    if auth_result is None:
+        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
+        sys.exit(1)
+
+    auth, _ = auth_result
     async with create_user_service_client(config) as client:
-        client.headers["Authorization"] = f"Bearer {data['jwt_token']}"
-        result = await rpc_call(client, RPC_ENDPOINT, "create_group", params)
+        result = await authenticated_rpc_call(
+            client, RPC_ENDPOINT, "create_group", params,
+            auth=auth, credential_name=credential_name,
+        )
         print("群组创建成功:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
@@ -70,17 +73,18 @@ async def invite_to_group(
     credential_name: str = "default",
 ) -> None:
     """邀请用户加入群组。"""
-    data = load_identity(credential_name)
-    if data is None:
-        print(f"未找到凭证 '{credential_name}'，请先创建身份")
+    config = SDKConfig()
+    auth_result = create_authenticator(credential_name, config)
+    if auth_result is None:
+        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
         sys.exit(1)
 
-    config = SDKConfig()
+    auth, _ = auth_result
     async with create_user_service_client(config) as client:
-        client.headers["Authorization"] = f"Bearer {data['jwt_token']}"
-        result = await rpc_call(
+        result = await authenticated_rpc_call(
             client, RPC_ENDPOINT, "invite",
             {"group_id": group_id, "target_did": target_did},
+            auth=auth, credential_name=credential_name,
         )
         print("邀请发送成功:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -92,17 +96,18 @@ async def join_group(
     credential_name: str = "default",
 ) -> None:
     """通过邀请加入群组。"""
-    data = load_identity(credential_name)
-    if data is None:
-        print(f"未找到凭证 '{credential_name}'，请先创建身份")
+    config = SDKConfig()
+    auth_result = create_authenticator(credential_name, config)
+    if auth_result is None:
+        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
         sys.exit(1)
 
-    config = SDKConfig()
+    auth, _ = auth_result
     async with create_user_service_client(config) as client:
-        client.headers["Authorization"] = f"Bearer {data['jwt_token']}"
-        result = await rpc_call(
+        result = await authenticated_rpc_call(
             client, RPC_ENDPOINT, "join",
             {"group_id": group_id, "invite_id": invite_id},
+            auth=auth, credential_name=credential_name,
         )
         print("加入群组成功:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -113,17 +118,18 @@ async def get_group_members(
     credential_name: str = "default",
 ) -> None:
     """查看群组成员。"""
-    data = load_identity(credential_name)
-    if data is None:
-        print(f"未找到凭证 '{credential_name}'，请先创建身份")
+    config = SDKConfig()
+    auth_result = create_authenticator(credential_name, config)
+    if auth_result is None:
+        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
         sys.exit(1)
 
-    config = SDKConfig()
+    auth, _ = auth_result
     async with create_user_service_client(config) as client:
-        client.headers["Authorization"] = f"Bearer {data['jwt_token']}"
-        result = await rpc_call(
+        result = await authenticated_rpc_call(
             client, RPC_ENDPOINT, "get_group_members",
             {"group_id": group_id},
+            auth=auth, credential_name=credential_name,
         )
         print("群组成员:")
         print(json.dumps(result, indent=2, ensure_ascii=False))

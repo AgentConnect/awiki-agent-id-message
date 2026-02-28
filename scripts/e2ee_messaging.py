@@ -34,8 +34,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from utils import SDKConfig, E2eeClient, create_molt_message_client, rpc_call
-from credential_store import load_identity
+from utils import SDKConfig, E2eeClient, create_molt_message_client, authenticated_rpc_call
+from credential_store import create_authenticator
 from e2ee_store import save_e2ee_state, load_e2ee_state
 
 
@@ -68,11 +68,11 @@ def _save_e2ee_client(client: E2eeClient, credential_name: str) -> None:
     save_e2ee_state(state, credential_name)
 
 
-async def _send_msg(client, sender_did, receiver_did, msg_type, content):
+async def _send_msg(client, sender_did, receiver_did, msg_type, content, *, auth, credential_name="default"):
     """发送消息（E2EE 或普通消息）。"""
     if isinstance(content, dict):
         content = json.dumps(content)
-    return await rpc_call(
+    return await authenticated_rpc_call(
         client, MESSAGE_RPC, "send",
         params={
             "sender_did": sender_did,
@@ -80,6 +80,8 @@ async def _send_msg(client, sender_did, receiver_did, msg_type, content):
             "content": content,
             "type": msg_type,
         },
+        auth=auth,
+        credential_name=credential_name,
     )
 
 
@@ -88,18 +90,19 @@ async def initiate_handshake(
     credential_name: str = "default",
 ) -> None:
     """发起 E2EE 握手。"""
-    data = load_identity(credential_name)
-    if data is None:
-        print(f"未找到凭证 '{credential_name}'，请先创建身份")
+    config = SDKConfig()
+    auth_result = create_authenticator(credential_name, config)
+    if auth_result is None:
+        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
         sys.exit(1)
 
+    auth, data = auth_result
     e2ee_client = _load_or_create_e2ee_client(data["did"], credential_name)
     msg_type, content = e2ee_client.initiate_handshake(peer_did)
 
-    config = SDKConfig()
     async with create_molt_message_client(config) as client:
-        client.headers["Authorization"] = f"Bearer {data['jwt_token']}"
-        await _send_msg(client, data["did"], peer_did, msg_type, content)
+        await _send_msg(client, data["did"], peer_did, msg_type, content,
+                        auth=auth, credential_name=credential_name)
 
     _save_e2ee_client(e2ee_client, credential_name)
 
@@ -115,11 +118,13 @@ async def send_encrypted(
     credential_name: str = "default",
 ) -> None:
     """发送加密消息。"""
-    data = load_identity(credential_name)
-    if data is None:
-        print(f"未找到凭证 '{credential_name}'，请先创建身份")
+    config = SDKConfig()
+    auth_result = create_authenticator(credential_name, config)
+    if auth_result is None:
+        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
         sys.exit(1)
 
+    auth, data = auth_result
     e2ee_client = _load_or_create_e2ee_client(data["did"], credential_name)
 
     if not e2ee_client.has_active_session(peer_did):
@@ -129,10 +134,9 @@ async def send_encrypted(
 
     enc_type, enc_content = e2ee_client.encrypt_message(peer_did, plaintext)
 
-    config = SDKConfig()
     async with create_molt_message_client(config) as client:
-        client.headers["Authorization"] = f"Bearer {data['jwt_token']}"
-        await _send_msg(client, data["did"], peer_did, enc_type, enc_content)
+        await _send_msg(client, data["did"], peer_did, enc_type, enc_content,
+                        auth=auth, credential_name=credential_name)
 
     print("加密消息已发送")
     print(f"  原文: {plaintext}")
@@ -144,19 +148,19 @@ async def process_inbox(
     credential_name: str = "default",
 ) -> None:
     """处理收件箱中的 E2EE 消息。"""
-    data = load_identity(credential_name)
-    if data is None:
-        print(f"未找到凭证 '{credential_name}'，请先创建身份")
+    config = SDKConfig()
+    auth_result = create_authenticator(credential_name, config)
+    if auth_result is None:
+        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
         sys.exit(1)
 
-    config = SDKConfig()
+    auth, data = auth_result
     async with create_molt_message_client(config) as client:
-        client.headers["Authorization"] = f"Bearer {data['jwt_token']}"
-
         # 获取收件箱
-        inbox = await rpc_call(
+        inbox = await authenticated_rpc_call(
             client, MESSAGE_RPC, "get_inbox",
             params={"user_did": data["did"], "limit": 50},
+            auth=auth, credential_name=credential_name,
         )
         messages = inbox.get("messages", [])
         if not messages:
@@ -206,7 +210,8 @@ async def process_inbox(
                     print(f"  [{msg_type}] 处理协议消息，生成 {len(responses)} 条响应")
                     for resp_type, resp_content in responses:
                         await _send_msg(
-                            client, data["did"], peer_did, resp_type, resp_content
+                            client, data["did"], peer_did, resp_type, resp_content,
+                            auth=auth, credential_name=credential_name,
                         )
                         print(f"    -> 发送 {resp_type}")
             else:
@@ -216,9 +221,10 @@ async def process_inbox(
 
         # 标记已读
         if processed_ids:
-            await rpc_call(
+            await authenticated_rpc_call(
                 client, MESSAGE_RPC, "mark_read",
                 params={"user_did": data["did"], "message_ids": processed_ids},
+                auth=auth, credential_name=credential_name,
             )
             print(f"\n已标记 {len(processed_ids)} 条消息为已读")
 

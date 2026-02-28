@@ -28,8 +28,8 @@ import json
 import sys
 from pathlib import Path
 
-from utils import SDKConfig, create_molt_message_client, rpc_call
-from credential_store import load_identity
+from utils import SDKConfig, create_molt_message_client, authenticated_rpc_call
+from credential_store import create_authenticator
 
 
 MESSAGE_RPC = "/message/rpc"
@@ -37,19 +37,21 @@ MESSAGE_RPC = "/message/rpc"
 
 async def check_inbox(credential_name: str = "default", limit: int = 20) -> None:
     """查看收件箱。"""
-    data = load_identity(credential_name)
-    if data is None:
-        print(f"未找到凭证 '{credential_name}'，请先创建身份")
+    config = SDKConfig()
+    auth_result = create_authenticator(credential_name, config)
+    if auth_result is None:
+        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
         sys.exit(1)
 
-    config = SDKConfig()
+    auth, data = auth_result
     async with create_molt_message_client(config) as client:
-        client.headers["Authorization"] = f"Bearer {data['jwt_token']}"
-        inbox = await rpc_call(
+        inbox = await authenticated_rpc_call(
             client,
             MESSAGE_RPC,
             "get_inbox",
             params={"user_did": data["did"], "limit": limit},
+            auth=auth,
+            credential_name=credential_name,
         )
         print(json.dumps(inbox, indent=2, ensure_ascii=False))
 
@@ -60,15 +62,15 @@ async def get_history(
     limit: int = 50,
 ) -> None:
     """查看与指定 DID 的聊天历史。"""
-    data = load_identity(credential_name)
-    if data is None:
-        print(f"未找到凭证 '{credential_name}'，请先创建身份")
+    config = SDKConfig()
+    auth_result = create_authenticator(credential_name, config)
+    if auth_result is None:
+        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
         sys.exit(1)
 
-    config = SDKConfig()
+    auth, data = auth_result
     async with create_molt_message_client(config) as client:
-        client.headers["Authorization"] = f"Bearer {data['jwt_token']}"
-        history = await rpc_call(
+        history = await authenticated_rpc_call(
             client,
             MESSAGE_RPC,
             "get_history",
@@ -77,6 +79,8 @@ async def get_history(
                 "peer_did": peer_did,
                 "limit": limit,
             },
+            auth=auth,
+            credential_name=credential_name,
         )
         print(json.dumps(history, indent=2, ensure_ascii=False))
 
@@ -86,15 +90,15 @@ async def mark_read(
     credential_name: str = "default",
 ) -> None:
     """标记消息为已读。"""
-    data = load_identity(credential_name)
-    if data is None:
-        print(f"未找到凭证 '{credential_name}'，请先创建身份")
+    config = SDKConfig()
+    auth_result = create_authenticator(credential_name, config)
+    if auth_result is None:
+        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
         sys.exit(1)
 
-    config = SDKConfig()
+    auth, data = auth_result
     async with create_molt_message_client(config) as client:
-        client.headers["Authorization"] = f"Bearer {data['jwt_token']}"
-        result = await rpc_call(
+        result = await authenticated_rpc_call(
             client,
             MESSAGE_RPC,
             "mark_read",
@@ -102,6 +106,8 @@ async def mark_read(
                 "user_did": data["did"],
                 "message_ids": message_ids,
             },
+            auth=auth,
+            credential_name=credential_name,
         )
         print("标记已读成功:")
         print(json.dumps(result, indent=2, ensure_ascii=False))

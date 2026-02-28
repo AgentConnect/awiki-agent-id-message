@@ -1,8 +1,9 @@
 """凭证持久化：保存/加载私钥、DID、JWT 到本地文件。
 
-[INPUT]: DIDIdentity 对象
-[OUTPUT]: save_identity(), load_identity(), list_identities(), delete_identity()
-[POS]: 凭证管理核心模块，支持跨会话身份复用
+[INPUT]: DIDIdentity 对象, DIDWbaAuthHeader (ANP SDK)
+[OUTPUT]: save_identity(), load_identity(), list_identities(), delete_identity(),
+         extract_auth_files(), create_authenticator()
+[POS]: 凭证管理核心模块，支持跨会话身份复用，提供 DIDWbaAuthHeader 工厂
 
 [PROTOCOL]:
 1. 逻辑变更时同步更新此头部
@@ -44,6 +45,7 @@ def save_identity(
     jwt_token: str | None = None,
     display_name: str | None = None,
     name: str = "default",
+    did_document: dict[str, Any] | None = None,
 ) -> Path:
     """保存 DID 身份到本地文件。
 
@@ -56,6 +58,7 @@ def save_identity(
         jwt_token: JWT token
         display_name: 显示名称
         name: 凭证名称（默认 "default"）
+        did_document: DID 文档（供 DIDWbaAuthHeader 使用）
 
     Returns:
         凭证文件路径
@@ -70,6 +73,7 @@ def save_identity(
             if isinstance(public_key_pem, bytes) else public_key_pem,
         "jwt_token": jwt_token,
         "name": display_name,
+        "did_document": did_document,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -155,3 +159,73 @@ def update_jwt(name: str, jwt_token: str) -> bool:
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
     os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
     return True
+
+
+def extract_auth_files(name: str = "default") -> tuple[Path, Path] | None:
+    """从凭证中提取 DID 文档和私钥文件供 DIDWbaAuthHeader 使用。
+
+    Args:
+        name: 凭证名称
+
+    Returns:
+        (did_doc_path, key_path) 元组，凭证不存在或缺少 DID 文档时返回 None
+    """
+    data = load_identity(name)
+    if data is None or not data.get("did_document"):
+        return None
+
+    cred_dir = _ensure_credentials_dir()
+
+    # 写入 DID 文档 JSON
+    did_doc_path = cred_dir / f"{name}_did_document.json"
+    did_doc_path.write_text(json.dumps(data["did_document"], indent=2, ensure_ascii=False))
+
+    # 写入私钥 PEM
+    key_path = cred_dir / f"{name}_private_key.pem"
+    private_key_pem = data["private_key_pem"]
+    if isinstance(private_key_pem, str):
+        private_key_pem = private_key_pem.encode("utf-8")
+    key_path.write_bytes(private_key_pem)
+    os.chmod(key_path, stat.S_IRUSR | stat.S_IWUSR)
+
+    return (did_doc_path, key_path)
+
+
+def create_authenticator(
+    name: str = "default",
+    config: Any = None,
+) -> tuple[Any, dict[str, Any]] | None:
+    """创建 DIDWbaAuthHeader 实例。
+
+    Args:
+        name: 凭证名称
+        config: SDKConfig 实例（用于预填充 token 缓存）
+
+    Returns:
+        (authenticator, identity_data) 元组，不可用时返回 None
+    """
+    from anp.authentication import DIDWbaAuthHeader
+
+    data = load_identity(name)
+    if data is None:
+        return None
+
+    auth_files = extract_auth_files(name)
+    if auth_files is None:
+        return None
+
+    did_doc_path, key_path = auth_files
+    auth = DIDWbaAuthHeader(str(did_doc_path), str(key_path))
+
+    # 若有已保存的 JWT，预填充到 token 缓存（避免首次请求重新 DIDWba 认证）
+    if data.get("jwt_token") and config is not None:
+        server_url = config.user_service_url
+        auth.update_token(server_url, {"Authorization": f"Bearer {data['jwt_token']}"})
+        # molt-message 也预填充
+        if hasattr(config, "molt_message_url"):
+            auth.update_token(
+                config.molt_message_url,
+                {"Authorization": f"Bearer {data['jwt_token']}"},
+            )
+
+    return (auth, data)

@@ -28,8 +28,8 @@ import json
 import sys
 from pathlib import Path
 
-from utils import SDKConfig, create_user_service_client, rpc_call
-from credential_store import load_identity
+from utils import SDKConfig, create_user_service_client, authenticated_rpc_call
+from credential_store import create_authenticator
 
 
 PROFILE_RPC = "/user-service/did/profile/rpc"
@@ -43,11 +43,6 @@ async def update_profile(
     profile_md: str | None = None,
 ) -> None:
     """更新自己的 Profile。"""
-    data = load_identity(credential_name)
-    if data is None:
-        print(f"未找到凭证 '{credential_name}'，请先创建身份")
-        sys.exit(1)
-
     params: dict = {}
     if nick_name is not None:
         params["nick_name"] = nick_name
@@ -64,9 +59,17 @@ async def update_profile(
         sys.exit(1)
 
     config = SDKConfig()
+    auth_result = create_authenticator(credential_name, config)
+    if auth_result is None:
+        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
+        sys.exit(1)
+
+    auth, _ = auth_result
     async with create_user_service_client(config) as client:
-        client.headers["Authorization"] = f"Bearer {data['jwt_token']}"
-        updated = await rpc_call(client, PROFILE_RPC, "update_me", params)
+        updated = await authenticated_rpc_call(
+            client, PROFILE_RPC, "update_me", params,
+            auth=auth, credential_name=credential_name,
+        )
         print("Profile 更新成功:")
         print(json.dumps(updated, indent=2, ensure_ascii=False))
 

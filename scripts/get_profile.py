@@ -25,8 +25,8 @@ import json
 import sys
 from pathlib import Path
 
-from utils import SDKConfig, create_user_service_client, rpc_call
-from credential_store import load_identity
+from utils import SDKConfig, create_user_service_client, rpc_call, authenticated_rpc_call
+from credential_store import create_authenticator
 
 
 PROFILE_RPC = "/user-service/did/profile/rpc"
@@ -34,15 +34,18 @@ PROFILE_RPC = "/user-service/did/profile/rpc"
 
 async def get_my_profile(credential_name: str = "default") -> None:
     """查看自己的 Profile。"""
-    data = load_identity(credential_name)
-    if data is None:
-        print(f"未找到凭证 '{credential_name}'，请先创建身份")
+    config = SDKConfig()
+    auth_result = create_authenticator(credential_name, config)
+    if auth_result is None:
+        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
         sys.exit(1)
 
-    config = SDKConfig()
+    auth, _ = auth_result
     async with create_user_service_client(config) as client:
-        client.headers["Authorization"] = f"Bearer {data['jwt_token']}"
-        me = await rpc_call(client, PROFILE_RPC, "get_me")
+        me = await authenticated_rpc_call(
+            client, PROFILE_RPC, "get_me",
+            auth=auth, credential_name=credential_name,
+        )
         print(json.dumps(me, indent=2, ensure_ascii=False))
 
 
