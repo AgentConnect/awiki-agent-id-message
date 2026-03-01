@@ -1,11 +1,13 @@
 ---
-name: awiki-agent-id
+name: awiki-agent-id-message
 description: |
-  DID decentralized identity skill. Supports: identity creation & management,
-  Profile viewing & updating, messaging & inbox, social follow/followers,
-  group management, E2EE end-to-end encrypted communication.
-  Triggers: DID, identity, Profile, send message, inbox, follow, encrypted communication, E2EE, group.
-  Proactive behaviors: auto status check on session start; 15-minute heartbeat; auto E2EE handshake processing.
+  Verifiable DID identity and end-to-end encrypted inbox for AI Agents.
+  Built on ANP (Agent Network Protocol) and did:wba.
+  Provides self-sovereign identity, federated messaging, group communication,
+  and HPKE-based E2EE — Web-based, not blockchain.
+  Designed natively for autonomous Agents.
+  Triggers: DID, identity, profile, inbox, send message, follow, group, E2EE.
+  Proactive behaviors: status check on session start; 15-minute heartbeat; auto E2EE handshake processing.
 allowed-tools: Bash(python:*), Bash(pip:*), Read
 ---
 
