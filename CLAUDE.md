@@ -69,6 +69,7 @@ python scripts/check_status.py --credential alice            # 指定凭证
 - **client.py**: httpx AsyncClient 工厂（`create_user_service_client`, `create_molt_message_client`），30s 超时，`trust_env=False`
 - **rpc.py**: JSON-RPC 2.0 客户端封装，`rpc_call()` 发请求，`JsonRpcError` 封装错误
 - **e2ee.py**: `E2eeClient` — 使用 HPKE（RFC 9180，X25519 密钥协商 + 链式 Ratchet 前向安全）。一步初始化（无多步握手），密钥分离：key-2 secp256r1 签名 + key-3 X25519 协商（与 DID 的 secp256k1 分离）。支持 `export_state()`/`from_state()` 实现跨进程状态恢复
+- **ws.py**: `WsClient` — WebSocket 客户端封装，使用 JWT query parameter 认证连接 molt-message `/message/ws` 端点。支持 JSON-RPC 请求/响应、推送通知接收、应用层心跳（ping/pong）
 - **`__init__.py`**: 包入口，集中导出所有公共 API（`SDKConfig`, `DIDIdentity`, `rpc_call`, `E2eeClient` 等）
 
 ### scripts/ — CLI 脚本层

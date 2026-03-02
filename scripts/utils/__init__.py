@@ -1,7 +1,7 @@
-"""awiki-sdk：DID 身份创建、WBA 认证、JWT 获取的通用 SDK。
+"""awiki-sdk：DID 身份创建、WBA 认证、JWT 获取、WebSocket 客户端的通用 SDK。
 
 [INPUT]: ANP 库
-[OUTPUT]: 公共 API（DIDIdentity, create_identity, register_did, ...）
+[OUTPUT]: 公共 API（DIDIdentity, create_identity, register_did, WsClient, ...）
 [POS]: 包入口，集中导出所有公共接口
 
 [PROTOCOL]:
@@ -21,6 +21,7 @@ from utils.auth import (
 from utils.client import create_user_service_client, create_molt_message_client
 from utils.e2ee import E2eeClient
 from utils.rpc import JsonRpcError, rpc_call, authenticated_rpc_call
+from utils.ws import WsClient
 
 __all__ = [
     # config
@@ -43,4 +44,6 @@ __all__ = [
     "JsonRpcError",
     "rpc_call",
     "authenticated_rpc_call",
+    # ws
+    "WsClient",
 ]
