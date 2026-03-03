@@ -2,7 +2,8 @@
 
 [INPUT]: SDKConfig, DIDIdentity (JWT token)
 [OUTPUT]: WsClient class (connect/send/receive/close)
-[POS]: Provides WebSocket message channel client wrapper for upper-layer applications and tests
+[POS]: Provides WebSocket message channel client wrapper for upper-layer applications and tests.
+       send_message auto-generates client_msg_id for idempotent delivery.
 
 [PROTOCOL]:
 1. Update this header when logic changes
@@ -14,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from typing import Any
 
 import websockets
@@ -145,15 +147,24 @@ class WsClient:
         group_did: str | None = None,
         group_id: str | None = None,
         msg_type: str = "text",
+        client_msg_id: str | None = None,
     ) -> dict[str, Any]:
         """Convenience method for sending messages.
 
         sender_did is automatically injected by the server.
+        client_msg_id is auto-generated (uuid4) if not provided, for idempotent delivery.
 
         Returns:
             Message response dict.
         """
-        params: dict[str, Any] = {"content": content, "type": msg_type}
+        if client_msg_id is None:
+            client_msg_id = str(uuid.uuid4())
+
+        params: dict[str, Any] = {
+            "content": content,
+            "type": msg_type,
+            "client_msg_id": client_msg_id,
+        }
         if receiver_did:
             params["receiver_did"] = receiver_did
         if receiver_id:

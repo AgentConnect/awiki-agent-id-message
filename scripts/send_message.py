@@ -8,8 +8,8 @@ Usage:
     uv run python scripts/send_message.py --to "did:wba:localhost:user:abc123" --content "hello" --type text
 
 [INPUT]: SDK (RPC calls), credential_store (load identity credentials)
-[OUTPUT]: Send result
-[POS]: Message sending script
+[OUTPUT]: Send result (with server_seq and client_msg_id)
+[POS]: Message sending script, auto-generates client_msg_id for idempotent delivery
 
 [PROTOCOL]:
 1. Update this header when logic changes
@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import json
 import sys
+import uuid
 from pathlib import Path
 
 from utils import SDKConfig, create_molt_message_client, authenticated_rpc_call
@@ -53,6 +54,7 @@ async def send_message(
                 "receiver_did": receiver_did,
                 "content": content,
                 "type": msg_type,
+                "client_msg_id": str(uuid.uuid4()),
             },
             auth=auth,
             credential_name=credential_name,
