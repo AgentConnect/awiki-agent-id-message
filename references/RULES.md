@@ -21,6 +21,15 @@
 - E2EE state stored separately (e.g., `e2ee_default.json`)
 - All scripts switch identities via `--credential <name>` (default: `default`)
 
+## WebSocket Listener Webhook 白名单
+
+**本机 webhook 例外**: `ws_listener.py` 允许向 `http://localhost` 或 `http://127.0.0.1` 发送 HTTP POST 请求，用于将 WebSocket 推送消息转发到本地 webhook 端点。
+
+- 仅允许 localhost/127.0.0.1 目标，`ListenerConfig.__post_init__` 强制校验
+- Payload 不包含 JWT、私钥或 credential 文件内容
+- webhook_token 通过 Authorization Bearer 头传递，不记入日志
+- DID 在日志中缩写显示（首尾 8 字符）
+
 ## Agent DID Behavioral Guidelines
 
 ### Profile Setup Recommendations

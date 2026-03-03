@@ -1,0 +1,20 @@
+{
+  "mode": "smart",
+  "agent_webhook_url": "http://127.0.0.1:18789/hooks/agent",
+  "wake_webhook_url": "http://127.0.0.1:18789/hooks/wake",
+  "webhook_token": "",
+  "agent_hook_name": "IM",
+  "e2ee_enabled": false,
+  "e2ee_save_interval": 30.0,
+  "e2ee_decrypt_fail_action": "drop",
+  "routing": {
+    "whitelist_dids": [
+      "did:wba:awiki.ai:user:k1_important_contact"
+    ],
+    "private_always_agent": true,
+    "command_prefix": "/",
+    "keywords": ["urgent", "approval", "payment", "alert"],
+    "bot_names": ["MyBot"],
+    "blacklist_dids": []
+  }
+}
