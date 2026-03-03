@@ -57,14 +57,13 @@ class ListenerConfig:
     # Routing rules (only effective when mode="smart")
     routing: RoutingRules = field(default_factory=RoutingRules)
 
-    # E2EE protocol message types (not forwarded, handled by heartbeat)
+    # E2EE protocol message types (intercepted by E2EE handler before classify_message)
     ignore_types: frozenset[str] = frozenset({
         "e2ee_init", "e2ee_msg", "e2ee_rekey", "e2ee_error",
         "e2ee_hello", "e2ee_finished", "e2ee",
     })
 
-    # E2EE transparent handling
-    e2ee_enabled: bool = False              # E2EE transparent handling switch (off by default)
+    # E2EE transparent handling (always enabled)
     e2ee_save_interval: float = 30.0        # E2EE state save interval (seconds)
     e2ee_decrypt_fail_action: str = "drop"  # Decryption failure action: "drop" / "forward_raw"
 
@@ -120,8 +119,6 @@ class ListenerConfig:
         env_wake = os.environ.get("LISTENER_WAKE_WEBHOOK_URL")
         env_token = os.environ.get("LISTENER_WEBHOOK_TOKEN")
         env_mode = os.environ.get("LISTENER_MODE")
-        env_e2ee = os.environ.get("LISTENER_E2EE_ENABLED")
-
         if env_agent:
             data["agent_webhook_url"] = env_agent
         if env_wake:
@@ -130,8 +127,6 @@ class ListenerConfig:
             data["webhook_token"] = env_token
         if env_mode:
             data["mode"] = env_mode
-        if env_e2ee is not None:
-            data["e2ee_enabled"] = env_e2ee.lower() in ("1", "true", "yes")
 
         # 3. CLI arguments take highest priority
         if mode_override:
@@ -156,7 +151,6 @@ class ListenerConfig:
             webhook_token=data.get("webhook_token", ""),
             agent_hook_name=data.get("agent_hook_name", "IM"),
             routing=routing,
-            e2ee_enabled=data.get("e2ee_enabled", False),
             e2ee_save_interval=float(data.get("e2ee_save_interval", 30.0)),
             e2ee_decrypt_fail_action=data.get("e2ee_decrypt_fail_action", "drop"),
         )

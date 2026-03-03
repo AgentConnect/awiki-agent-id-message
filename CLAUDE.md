@@ -68,7 +68,7 @@ python scripts/check_status.py --credential alice            # Specify credentia
 
 # WebSocket listener (background service management)
 python scripts/ws_listener.py install --credential default --mode smart  # Install and start
-python scripts/ws_listener.py install --credential default --config launchd/listener.json  # Install with config
+python scripts/ws_listener.py install --credential default --config service/listener.json  # Install with config
 python scripts/ws_listener.py status                        # View service status
 python scripts/ws_listener.py stop                          # Stop service
 python scripts/ws_listener.py start                         # Start installed service
@@ -97,14 +97,14 @@ Three-layer architecture: CLI script layer -> Persistence layer -> Core utility 
 - **check_status.py**: Unified status check entry point — chains identity verification, inbox classification summary, E2EE auto-handshake processing. Outputs structured JSON. Called by Agent session startup protocol and heartbeat
 - **listener_config.py**: `ListenerConfig` + `RoutingRules` — WebSocket listener configuration module. Defines dual webhook endpoints, routing modes (agent-all/smart/wake-all), message routing rules and E2EE transparent processing parameters. Supports JSON file + environment variables + CLI three-level override
 - **e2ee_handler.py**: `E2eeHandler` — E2EE transparent handler for WebSocket listener. Intercepts E2EE messages before `classify_message`: protocol messages (init/rekey/error) are handled internally without forwarding, encrypted messages (e2ee_msg) are decrypted and forwarded as plaintext. asyncio.Lock protects concurrency, periodic state saving
-- **ws_listener.py**: WebSocket listener — persistent background process + launchd lifecycle management. Reuses `WsClient` to connect to molt-message WebSocket. E2EE messages handled transparently by `E2eeHandler` (optional). Others routed via `classify_message()` (agent/wake/discard) and forwarded to corresponding localhost webhook endpoints. Subcommands: `run` (foreground debug), `install` (install launchd service), `uninstall`, `start`/`stop`/`status` (management)
+- **ws_listener.py**: WebSocket listener — persistent background process + cross-platform service lifecycle management. Reuses `WsClient` to connect to molt-message WebSocket. E2EE messages handled transparently by `E2eeHandler` (optional). Others routed via `classify_message()` (agent/wake/discard) and forwarded to corresponding localhost webhook endpoints. Subcommands: `run` (foreground debug), `install` (install background service), `uninstall`, `start`/`stop`/`status` (management). Service management delegated to `service_manager.py`
+- **service_manager.py**: `ServiceManager` base class + `MacOSServiceManager` (launchd) / `LinuxServiceManager` (systemd) / `WindowsServiceManager` (Task Scheduler) + `get_service_manager()` factory. Handles install/uninstall/start/stop/status for each platform
 - Other scripts are CLI entry points for each feature, wrapping async calls via `asyncio.run()`
 
-### launchd/ — macOS Service Management
+### service/ — Cross-Platform Service Management
 
-- **com.awiki.ws-listener.plist**: macOS LaunchAgent configuration template for hosting ws_listener.py background process
 - **listener.example.json**: Routing rules + E2EE configuration example (webhook URLs, whitelist, blacklist, keywords, E2EE toggle, etc.)
-- **README.md**: Installation/uninstallation/debugging instructions
+- **README.md**: Cross-platform deployment guide (macOS launchd / Linux systemd / Windows Task Scheduler)
 
 ### tests/ — Unit Tests (migrated to awiki-system-test)
 

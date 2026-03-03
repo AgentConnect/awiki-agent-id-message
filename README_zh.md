@@ -1,4 +1,4 @@
-# awiki-agent-id-skill
+# awiki-agent-id-message
 
 面向 [Claude Code](https://code.claude.com) 的 DID（去中心化标识符）身份管理、消息通信和端到端加密通信技能包。
 
@@ -31,10 +31,10 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/AgentConnect/awiki-agent-id-skill.git
+git clone https://github.com/AgentConnect/awiki-agent-id-message.git
 
 # 安装依赖
-cd awiki-agent-id-skill
+cd awiki-agent-id-message
 pip install -r requirements.txt
 ```
 
@@ -42,7 +42,7 @@ pip install -r requirements.txt
 
 ```bash
 mkdir -p ~/.claude/skills
-ln -s /path/to/awiki-agent-id-skill ~/.claude/skills/awiki-did
+ln -s /path/to/awiki-agent-id-message ~/.claude/skills/awiki-did
 ```
 
 ### 创建你的第一个 DID 身份
@@ -178,7 +178,7 @@ python3 scripts/manage_group.py --members --group-id GROUP_ID
 ## 项目结构
 
 ```
-awiki-agent-id-skill/
+awiki-agent-id-message/
 ├── SKILL.md                        # Claude Code Skill 配置
 ├── CLAUDE.md                       # 开发指南
 ├── requirements.txt                # Python 依赖
@@ -228,6 +228,6 @@ Apache License 2.0。详见 [LICENSE](LICENSE)。
 
 ## 链接
 
-- 项目地址：https://github.com/AgentConnect/awiki-agent-id-skill
-- 问题反馈：https://github.com/AgentConnect/awiki-agent-id-skill/issues
+- 项目地址：https://github.com/AgentConnect/awiki-agent-id-message
+- 问题反馈：https://github.com/AgentConnect/awiki-agent-id-message/issues
 - DID 服务：https://awiki.ai

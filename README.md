@@ -1,4 +1,4 @@
-# awiki-agent-id-skill
+# awiki-agent-id-message
 
 [Claude Code](https://code.claude.com) Skills for DID (Decentralized Identifier) identity management, messaging, and end-to-end encrypted communication.
 
@@ -31,10 +31,10 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/AgentConnect/awiki-agent-id-skill.git
+git clone https://github.com/AgentConnect/awiki-agent-id-message.git
 
 # Install dependencies
-cd awiki-agent-id-skill
+cd awiki-agent-id-message
 pip install -r requirements.txt
 ```
 
@@ -42,7 +42,7 @@ pip install -r requirements.txt
 
 ```bash
 mkdir -p ~/.claude/skills
-ln -s /path/to/awiki-agent-id-skill ~/.claude/skills/awiki-did
+ln -s /path/to/awiki-agent-id-message ~/.claude/skills/awiki-did
 ```
 
 ### Create Your First DID Identity
@@ -178,7 +178,7 @@ Identity credentials are stored in `.credentials/` (ignored by `.gitignore`):
 ## Project Structure
 
 ```
-awiki-agent-id-skill/
+awiki-agent-id-message/
 ├── SKILL.md                        # Skill configuration for Claude Code
 ├── CLAUDE.md                       # Development guidelines
 ├── requirements.txt                # Python dependencies
@@ -228,6 +228,6 @@ Apache License 2.0. See [LICENSE](LICENSE) for details.
 
 ## Links
 
-- Repository: https://github.com/AgentConnect/awiki-agent-id-skill
-- Issues: https://github.com/AgentConnect/awiki-agent-id-skill/issues
+- Repository: https://github.com/AgentConnect/awiki-agent-id-message
+- Issues: https://github.com/AgentConnect/awiki-agent-id-message/issues
 - DID Service: https://awiki.ai

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """WebSocket listener: long-running background process that receives molt-message pushes and routes to webhooks.
 
-[INPUT]: credential_store (DID identity), SDKConfig, WsClient, ListenerConfig, E2eeHandler
-[OUTPUT]: WebSocket -> HTTP webhook bridge (agent/wake dual endpoints) + launchd lifecycle management
-[POS]: Standalone background process managed by launchd, reuses utils/ core tool layer
+[INPUT]: credential_store (DID identity), SDKConfig, WsClient, ListenerConfig, E2eeHandler, service_manager
+[OUTPUT]: WebSocket -> HTTP webhook bridge (agent/wake dual endpoints) + cross-platform service lifecycle management
+[POS]: Standalone background process with cross-platform service management (launchd / systemd / Task Scheduler), reuses utils/ core tool layer
 
 [PROTOCOL]:
 1. Update this header when logic changes
@@ -14,8 +14,8 @@ Core pipeline:
 
 Subcommands:
   run       Run in foreground (for debugging)
-  install   Install launchd service and start
-  uninstall Uninstall launchd service
+  install   Install background service and start
+  uninstall Uninstall background service
   start     Start an installed service
   stop      Stop a running service
   status    Show service status
@@ -28,12 +28,8 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import signal
-import subprocess
 import sys
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 # Ensure scripts/ is in sys.path (consistent with other scripts)
@@ -51,13 +47,6 @@ from utils.identity import DIDIdentity
 from utils.ws import WsClient
 
 logger = logging.getLogger("ws_listener")
-
-# launchd constants
-_PLIST_LABEL = "com.awiki.ws-listener"
-_LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
-_PLIST_DEST = _LAUNCH_AGENTS_DIR / f"{_PLIST_LABEL}.plist"
-_PLIST_TEMPLATE = Path(__file__).resolve().parent.parent / "launchd" / f"{_PLIST_LABEL}.plist"
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 # --- Utility Functions --------------------------------------------------------
@@ -141,10 +130,14 @@ async def _forward(
     """Forward a message to an OpenClaw webhook endpoint.
 
     Constructs different payloads based on route:
-    - agent -> POST /hooks/agent  {"message": "...", "name": "IM", "wakeMode": "now"}
+    - agent -> POST /hooks/agent  {"message": "...", "name": "IM", "deliver": true, "channel": "last"}
     - wake  -> POST /hooks/wake   {"text": "...", "mode": "now"}
+
+    The agent message includes all fields from the ANP new_message notification
+    (spec 09) so the receiving agent has full context for replies.
     """
-    sender = _truncate_did(params.get("sender_did", "unknown"))
+    sender_did = params.get("sender_did", "unknown")
+    sender = _truncate_did(sender_did)
     content = str(params.get("content", ""))
     content_preview = content[:50]
     msg_type = params.get("type", "text")
@@ -157,14 +150,35 @@ async def _forward(
         headers["Authorization"] = f"Bearer {token}"
 
     if route == "agent":
-        # OpenClaw /hooks/agent format
-        context = "DM" if is_private else f"Group({_truncate_did(group_did or '')})"
+        # Build structured message with full ANP notification fields
+        context = "DM" if is_private else "Group"
+        lines = [f"[IM {context}] New message"]
+        lines.append(f"sender_did: {sender_did}")
+        if params.get("sender_name"):
+            lines.append(f"sender_name: {params['sender_name']}")
+        if params.get("receiver_did"):
+            lines.append(f"receiver_did: {params['receiver_did']}")
+        if group_did:
+            lines.append(f"group_did: {group_did}")
+        if params.get("group_name"):
+            lines.append(f"group_name: {params['group_name']}")
+        lines.append(f"type: {msg_type}")
+        if params.get("id"):
+            lines.append(f"msg_id: {params['id']}")
+        if params.get("server_seq") is not None:
+            lines.append(f"server_seq: {params['server_seq']}")
+        if params.get("sent_at"):
+            lines.append(f"sent_at: {params['sent_at']}")
+        if params.get("_e2ee"):
+            lines.append("e2ee: true")
+        lines.append("")
+        lines.append(content)
+
         body: dict[str, Any] = {
-            "message": (
-                f"[IM {context}] {sender} ({msg_type}):\n{content}"
-            ),
+            "message": "\n".join(lines),
             "name": cfg.agent_hook_name,
-            "wakeMode": "now",
+            "deliver": True,
+            "channel": "last",
         }
     else:
         # OpenClaw /hooks/wake format
@@ -264,14 +278,12 @@ async def listen_loop(
 
     delay = cfg.reconnect_base_delay
 
-    # E2EE handler initialization
-    e2ee_handler: E2eeHandler | None = None
-    if cfg.e2ee_enabled:
-        e2ee_handler = E2eeHandler(
-            credential_name,
-            save_interval=cfg.e2ee_save_interval,
-            decrypt_fail_action=cfg.e2ee_decrypt_fail_action,
-        )
+    # E2EE handler initialization (always enabled)
+    e2ee_handler: E2eeHandler | None = E2eeHandler(
+        credential_name,
+        save_interval=cfg.e2ee_save_interval,
+        decrypt_fail_action=cfg.e2ee_decrypt_fail_action,
+    )
 
     async with httpx.AsyncClient(timeout=10.0, trust_env=False) as http:
         while True:
@@ -301,9 +313,8 @@ async def listen_loop(
                     logger.warning("E2EE initialization failed, running in non-E2EE mode")
                     e2ee_handler = None
 
-            logger.info("Connecting to WebSocket... DID=%s mode=%s e2ee=%s",
-                        _truncate_did(my_did), cfg.mode,
-                        e2ee_handler is not None and e2ee_handler.is_ready)
+            logger.info("Connecting to WebSocket... DID=%s mode=%s e2ee=True",
+                        _truncate_did(my_did), cfg.mode)
 
             heartbeat: asyncio.Task | None = None
             try:
@@ -396,174 +407,36 @@ async def listen_loop(
             delay = min(delay * 2, cfg.reconnect_max_delay)
 
 
-# --- launchd Lifecycle Management ---------------------------------------------
-
-def _find_python() -> str:
-    """Find the current venv or system Python path."""
-    # Prefer venv
-    venv_python = _PROJECT_ROOT / ".venv" / "bin" / "python"
-    if venv_python.exists():
-        return str(venv_python)
-    return sys.executable
-
-
-def _generate_plist(
-    credential: str,
-    config_path: str | None,
-    mode: str | None,
-) -> str:
-    """Generate launchd plist XML content."""
-    python_path = _find_python()
-    script_path = str(Path(__file__).resolve())
-
-    args = [python_path, script_path, "run",
-            "--credential", credential]
-    if config_path:
-        args.extend(["--config", str(Path(config_path).resolve())])
-    if mode:
-        args.extend(["--mode", mode])
-
-    args_xml = "\n        ".join(f"<string>{a}</string>" for a in args)
-
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>{_PLIST_LABEL}</string>
-
-    <key>ProgramArguments</key>
-    <array>
-        {args_xml}
-    </array>
-
-    <key>RunAtLoad</key>
-    <true/>
-
-    <key>KeepAlive</key>
-    <true/>
-
-    <key>ThrottleInterval</key>
-    <integer>10</integer>
-
-    <key>WorkingDirectory</key>
-    <string>{_PROJECT_ROOT}</string>
-
-    <key>StandardOutPath</key>
-    <string>/tmp/awiki-ws-listener.stdout.log</string>
-    <key>StandardErrorPath</key>
-    <string>/tmp/awiki-ws-listener.stderr.log</string>
-</dict>
-</plist>
-"""
-
-
-def _launchctl(*args: str) -> subprocess.CompletedProcess:
-    """Run a launchctl command."""
-    return subprocess.run(
-        ["launchctl", *args],
-        capture_output=True, text=True,
-    )
-
+# --- Service Lifecycle (delegates to service_manager) -------------------------
 
 def cmd_install(args: argparse.Namespace) -> None:
-    """Install and start the launchd service."""
-    if _PLIST_DEST.exists():
-        print(f"Service already installed: {_PLIST_DEST}")
-        print("To reinstall, run first: python scripts/ws_listener.py uninstall")
-        return
-
-    _LAUNCH_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
-
-    plist_content = _generate_plist(args.credential, args.config, args.mode)
-    _PLIST_DEST.write_text(plist_content, encoding="utf-8")
-    print(f"plist written to: {_PLIST_DEST}")
-
-    result = _launchctl("load", str(_PLIST_DEST))
-    if result.returncode == 0:
-        print("Service installed and started")
-        print(f"  Logs: tail -f /tmp/awiki-ws-listener.stderr.log")
-    else:
-        print(f"launchctl load failed: {result.stderr.strip()}")
+    """Install and start the background service."""
+    from service_manager import get_service_manager
+    get_service_manager().install(args.credential, args.config, args.mode)
 
 
 def cmd_uninstall(args: argparse.Namespace) -> None:
-    """Uninstall the launchd service."""
-    if not _PLIST_DEST.exists():
-        print("Service not installed")
-        return
-
-    result = _launchctl("unload", str(_PLIST_DEST))
-    if result.returncode != 0:
-        print(f"launchctl unload warning: {result.stderr.strip()}")
-
-    _PLIST_DEST.unlink()
-    print("Service uninstalled")
+    """Uninstall the background service."""
+    from service_manager import get_service_manager
+    get_service_manager().uninstall()
 
 
 def cmd_start(args: argparse.Namespace) -> None:
     """Start an installed service."""
-    if not _PLIST_DEST.exists():
-        print("Service not installed, run first: python scripts/ws_listener.py install")
-        return
-
-    result = _launchctl("load", str(_PLIST_DEST))
-    if result.returncode == 0:
-        print("Service started")
-    else:
-        print(f"Start failed: {result.stderr.strip()}")
+    from service_manager import get_service_manager
+    get_service_manager().start()
 
 
 def cmd_stop(args: argparse.Namespace) -> None:
     """Stop a running service."""
-    if not _PLIST_DEST.exists():
-        print("Service not installed")
-        return
-
-    result = _launchctl("unload", str(_PLIST_DEST))
-    if result.returncode == 0:
-        print("Service stopped")
-    else:
-        print(f"Stop failed: {result.stderr.strip()}")
+    from service_manager import get_service_manager
+    get_service_manager().stop()
 
 
 def cmd_status(args: argparse.Namespace) -> None:
     """Show service status."""
-    output: dict[str, Any] = {
-        "installed": _PLIST_DEST.exists(),
-        "plist_path": str(_PLIST_DEST),
-    }
-
-    if _PLIST_DEST.exists():
-        result = _launchctl("list")
-        running = _PLIST_LABEL in result.stdout
-        output["running"] = running
-
-        # Read plist to extract configuration info
-        try:
-            plist_text = _PLIST_DEST.read_text(encoding="utf-8")
-            # Simple extraction of mode (if present)
-            if "--mode" in plist_text:
-                # Find the value after --mode
-                parts = plist_text.split("--mode")
-                if len(parts) > 1:
-                    import re
-                    match = re.search(r"<string>(\w[\w-]*)</string>", parts[1])
-                    if match:
-                        output["mode"] = match.group(1)
-        except Exception:
-            pass
-
-        # Log file info
-        stderr_log = Path("/tmp/awiki-ws-listener.stderr.log")
-        stdout_log = Path("/tmp/awiki-ws-listener.stdout.log")
-        if stderr_log.exists():
-            output["log_size_bytes"] = stderr_log.stat().st_size
-            output["log_path"] = str(stderr_log)
-    else:
-        output["running"] = False
-
-    print(json.dumps(output, indent=2, ensure_ascii=False))
+    from service_manager import get_service_manager
+    print(json.dumps(get_service_manager().status(), indent=2, ensure_ascii=False))
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -591,8 +464,9 @@ def cmd_run(args: argparse.Namespace) -> None:
         if task and not task.done():
             task.cancel()
 
-    signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
+    if sys.platform != "win32":
+        signal.signal(signal.SIGTERM, _shutdown)
 
     try:
         task = loop.create_task(listen_loop(args.credential, cfg))
@@ -622,7 +496,7 @@ def main() -> None:
     p_run.set_defaults(func=cmd_run)
 
     # --- install ---
-    p_install = subparsers.add_parser("install", help="Install launchd service and start")
+    p_install = subparsers.add_parser("install", help="Install background service and start")
     p_install.add_argument("--credential", default="default", help="Credential name")
     p_install.add_argument("--config", default=None, help="JSON config file path")
     p_install.add_argument("--mode", choices=ROUTING_MODES, default=None,
@@ -630,7 +504,7 @@ def main() -> None:
     p_install.set_defaults(func=cmd_install)
 
     # --- uninstall ---
-    p_uninstall = subparsers.add_parser("uninstall", help="Uninstall launchd service")
+    p_uninstall = subparsers.add_parser("uninstall", help="Uninstall background service")
     p_uninstall.set_defaults(func=cmd_uninstall)
 
     # --- start ---
