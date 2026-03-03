@@ -1,12 +1,12 @@
-"""httpx AsyncClient 工厂。
+"""httpx AsyncClient factory.
 
 [INPUT]: SDKConfig
 [OUTPUT]: create_user_service_client(), create_molt_message_client()
-[POS]: 提供预配置的 HTTP 客户端
+[POS]: Provides pre-configured HTTP clients
 
 [PROTOCOL]:
-1. 逻辑变更时同步更新此头部
-2. 更新后检查所在文件夹的 CLAUDE.md
+1. Update this header when logic changes
+2. Check the folder's CLAUDE.md after updates
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from utils.config import SDKConfig
 
 
 def create_user_service_client(config: SDKConfig) -> httpx.AsyncClient:
-    """创建指向 user-service 的异步 HTTP 客户端。"""
+    """Create an async HTTP client for user-service."""
     return httpx.AsyncClient(
         base_url=config.user_service_url,
         timeout=30.0,
@@ -26,7 +26,7 @@ def create_user_service_client(config: SDKConfig) -> httpx.AsyncClient:
 
 
 def create_molt_message_client(config: SDKConfig) -> httpx.AsyncClient:
-    """创建指向 molt-message 的异步 HTTP 客户端。"""
+    """Create an async HTTP client for molt-message."""
     return httpx.AsyncClient(
         base_url=config.molt_message_url,
         timeout=30.0,

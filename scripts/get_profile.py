@@ -1,22 +1,22 @@
-"""查看 DID Profile（自己或公开）。
+"""View DID Profile (own or public).
 
-用法：
-    # 查看自己的 Profile
+Usage:
+    # View own Profile
     uv run python scripts/get_profile.py
 
-    # 查看指定 DID 的公开 Profile
+    # View public Profile of a specific DID
     uv run python scripts/get_profile.py --did "did:wba:localhost:user:abc123"
 
-    # 解析 DID 文档
+    # Resolve a DID document
     uv run python scripts/get_profile.py --resolve "did:wba:localhost:user:abc123"
 
-[INPUT]: SDK（RPC 调用）、credential_store（加载身份凭证）
-[OUTPUT]: Profile 信息的 JSON 输出
-[POS]: Profile 查询脚本
+[INPUT]: SDK (RPC calls), credential_store (load identity credentials)
+[OUTPUT]: Profile information as JSON output
+[POS]: Profile query script
 
 [PROTOCOL]:
-1. 逻辑变更时同步更新此头部
-2. 更新后检查所在文件夹的 CLAUDE.md
+1. Update this header when logic changes
+2. Check the folder's CLAUDE.md after updating
 """
 
 import argparse
@@ -33,11 +33,11 @@ PROFILE_RPC = "/user-service/did/profile/rpc"
 
 
 async def get_my_profile(credential_name: str = "default") -> None:
-    """查看自己的 Profile。"""
+    """View own Profile."""
     config = SDKConfig()
     auth_result = create_authenticator(credential_name, config)
     if auth_result is None:
-        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
+        print(f"Credential '{credential_name}' unavailable; please create an identity first")
         sys.exit(1)
 
     auth, _ = auth_result
@@ -50,7 +50,7 @@ async def get_my_profile(credential_name: str = "default") -> None:
 
 
 async def get_public_profile(did: str) -> None:
-    """查看指定 DID 的公开 Profile。"""
+    """View public Profile of a specific DID."""
     config = SDKConfig()
     async with create_user_service_client(config) as client:
         profile = await rpc_call(
@@ -60,7 +60,7 @@ async def get_public_profile(did: str) -> None:
 
 
 async def resolve_did(did: str) -> None:
-    """解析 DID 文档。"""
+    """Resolve a DID document."""
     config = SDKConfig()
     async with create_user_service_client(config) as client:
         resolved = await rpc_call(
@@ -70,11 +70,11 @@ async def resolve_did(did: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="查看 DID Profile")
-    parser.add_argument("--did", type=str, help="查看指定 DID 的公开 Profile")
-    parser.add_argument("--resolve", type=str, help="解析指定 DID 文档")
+    parser = argparse.ArgumentParser(description="View DID Profile")
+    parser.add_argument("--did", type=str, help="View public Profile of a specific DID")
+    parser.add_argument("--resolve", type=str, help="Resolve a specific DID document")
     parser.add_argument("--credential", type=str, default="default",
-                        help="凭证名称（默认: default）")
+                        help="Credential name (default: default)")
 
     args = parser.parse_args()
 

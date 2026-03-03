@@ -1,28 +1,28 @@
-"""E2EE 端到端加密消息收发（HPKE 方案，支持跨进程状态持久化）。
+"""E2EE end-to-end encrypted messaging (HPKE scheme, with cross-process state persistence).
 
-用法：
-    # 发起 E2EE 会话（一步初始化，会话立即 ACTIVE）
+Usage:
+    # Initiate an E2EE session (one-step initialization, session immediately ACTIVE)
     uv run python scripts/e2ee_messaging.py --handshake "did:wba:awiki.ai:user:abc123"
 
-    # 发送加密消息（需要先完成初始化）
+    # Send an encrypted message (requires initialization first)
     uv run python scripts/e2ee_messaging.py --send "did:wba:awiki.ai:user:abc123" --content "secret message"
 
-    # 处理收件箱中的 E2EE 消息（自动处理 init + 解密）
+    # Process E2EE messages in inbox (auto-handle init + decrypt)
     uv run python scripts/e2ee_messaging.py --process --peer "did:wba:awiki.ai:user:abc123"
 
-支持的工作流：
-1. Alice: --handshake <Bob's DID>       → 发起会话（一步初始化，立即 ACTIVE）
-2. Bob:   --process --peer <Alice's DID> → 处理收件箱（收到 e2ee_init，会话直接 ACTIVE）
-3. Alice: --send <Bob's DID> --content "secret" → 发送加密消息
-4. Bob:   --process --peer <Alice's DID> → 从磁盘恢复会话，解密消息
+Supported workflows:
+1. Alice: --handshake <Bob's DID>       -> Initiate session (one-step init, immediately ACTIVE)
+2. Bob:   --process --peer <Alice's DID> -> Process inbox (receive e2ee_init, session directly ACTIVE)
+3. Alice: --send <Bob's DID> --content "secret" -> Send encrypted message
+4. Bob:   --process --peer <Alice's DID> -> Restore session from disk, decrypt message
 
-[INPUT]: SDK（E2eeClient、RPC 调用）、credential_store（加载身份凭证）、e2ee_store（E2EE 状态持久化）
-[OUTPUT]: E2EE 操作结果
-[POS]: 端到端加密消息脚本，集成状态持久化支持跨进程 E2EE 通信（HPKE 方案）
+[INPUT]: SDK (E2eeClient, RPC calls), credential_store (load identity credentials), e2ee_store (E2EE state persistence)
+[OUTPUT]: E2EE operation results
+[POS]: End-to-end encrypted messaging script, integrates state persistence for cross-process E2EE communication (HPKE scheme)
 
 [PROTOCOL]:
-1. 逻辑变更时同步更新此头部
-2. 更新后检查所在文件夹的 CLAUDE.md
+1. Update this header when logic changes
+2. Check the folder's CLAUDE.md after updating
 """
 
 import argparse
@@ -39,21 +39,21 @@ from e2ee_store import save_e2ee_state, load_e2ee_state
 
 MESSAGE_RPC = "/message/rpc"
 
-# E2EE 相关消息类型
+# E2EE related message types
 _E2EE_MSG_TYPES = {"e2ee_init", "e2ee_msg", "e2ee_rekey", "e2ee_error"}
 
-# E2EE 消息类型的协议顺序
+# E2EE message type protocol order
 _E2EE_TYPE_ORDER = {"e2ee_init": 0, "e2ee_rekey": 1, "e2ee_msg": 2, "e2ee_error": 3}
 
 
 def _load_or_create_e2ee_client(
     local_did: str, credential_name: str
 ) -> E2eeClient:
-    """从磁盘加载已有 E2EE 客户端状态，不存在时创建新客户端。
+    """Load existing E2EE client state from disk, or create a new client if absent.
 
-    从凭证中加载 E2EE 密钥（signing_pem + x25519_pem）。
+    Loads E2EE keys (signing_pem + x25519_pem) from credential.
     """
-    # 从凭证加载 E2EE 密钥
+    # Load E2EE keys from credential
     cred = load_identity(credential_name)
     signing_pem: str | None = None
     x25519_pem: str | None = None
@@ -62,11 +62,11 @@ def _load_or_create_e2ee_client(
         x25519_pem = cred.get("e2ee_agreement_private_pem")
 
     if signing_pem is None or x25519_pem is None:
-        print("警告: 凭证缺少 E2EE 密钥（key-2/key-3），请重新创建身份以启用 HPKE E2EE")
+        print("Warning: Credential missing E2EE keys (key-2/key-3); please recreate identity to enable HPKE E2EE")
 
     state = load_e2ee_state(credential_name)
     if state is not None and state.get("local_did") == local_did:
-        # 用凭证中的密钥覆盖状态中的（确保使用最新密钥）
+        # Override state keys with credential keys (ensure latest keys are used)
         if signing_pem is not None:
             state["signing_pem"] = signing_pem
         if x25519_pem is not None:
@@ -78,13 +78,13 @@ def _load_or_create_e2ee_client(
 
 
 def _save_e2ee_client(client: E2eeClient, credential_name: str) -> None:
-    """将 E2EE 客户端状态保存到磁盘。"""
+    """Save E2EE client state to disk."""
     state = client.export_state()
     save_e2ee_state(state, credential_name)
 
 
 async def _send_msg(client, sender_did, receiver_did, msg_type, content, *, auth, credential_name="default"):
-    """发送消息（E2EE 或普通消息）。"""
+    """Send a message (E2EE or plain)."""
     if isinstance(content, dict):
         content = json.dumps(content)
     return await authenticated_rpc_call(
@@ -104,11 +104,11 @@ async def initiate_handshake(
     peer_did: str,
     credential_name: str = "default",
 ) -> None:
-    """发起 E2EE 会话（一步初始化）。"""
+    """Initiate an E2EE session (one-step initialization)."""
     config = SDKConfig()
     auth_result = create_authenticator(credential_name, config)
     if auth_result is None:
-        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
+        print(f"Credential '{credential_name}' unavailable; please create an identity first")
         sys.exit(1)
 
     auth, data = auth_result
@@ -121,10 +121,10 @@ async def initiate_handshake(
 
     _save_e2ee_client(e2ee_client, credential_name)
 
-    print(f"E2EE 会话已建立（一步初始化）")
+    print(f"E2EE session established (one-step initialization)")
     print(f"  session_id: {content.get('session_id')}")
     print(f"  peer_did  : {peer_did}")
-    print("会话已 ACTIVE，可以直接发送加密消息")
+    print("Session is ACTIVE; you can send encrypted messages now")
 
 
 async def send_encrypted(
@@ -132,19 +132,19 @@ async def send_encrypted(
     plaintext: str,
     credential_name: str = "default",
 ) -> None:
-    """发送加密消息。"""
+    """Send an encrypted message."""
     config = SDKConfig()
     auth_result = create_authenticator(credential_name, config)
     if auth_result is None:
-        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
+        print(f"Credential '{credential_name}' unavailable; please create an identity first")
         sys.exit(1)
 
     auth, data = auth_result
     e2ee_client = _load_or_create_e2ee_client(data["did"], credential_name)
 
     if not e2ee_client.has_active_session(peer_did):
-        print(f"没有与 {peer_did} 的活跃 E2EE 会话")
-        print("请先发起 E2EE 会话: --handshake <DID>")
+        print(f"No active E2EE session with {peer_did}")
+        print("Please initiate an E2EE session first: --handshake <DID>")
         sys.exit(1)
 
     enc_type, enc_content = e2ee_client.encrypt_message(peer_did, plaintext)
@@ -153,28 +153,28 @@ async def send_encrypted(
         await _send_msg(client, data["did"], peer_did, enc_type, enc_content,
                         auth=auth, credential_name=credential_name)
 
-    # 保存状态（send_seq 已递增）
+    # Save state (send_seq incremented)
     _save_e2ee_client(e2ee_client, credential_name)
 
-    print("加密消息已发送")
-    print(f"  原文: {plaintext}")
-    print(f"  接收方: {peer_did}")
+    print("Encrypted message sent")
+    print(f"  Plaintext: {plaintext}")
+    print(f"  Receiver : {peer_did}")
 
 
 async def process_inbox(
     peer_did: str,
     credential_name: str = "default",
 ) -> None:
-    """处理收件箱中的 E2EE 消息。"""
+    """Process E2EE messages in inbox."""
     config = SDKConfig()
     auth_result = create_authenticator(credential_name, config)
     if auth_result is None:
-        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
+        print(f"Credential '{credential_name}' unavailable; please create an identity first")
         sys.exit(1)
 
     auth, data = auth_result
     async with create_molt_message_client(config) as client:
-        # 获取收件箱
+        # Get inbox
         inbox = await authenticated_rpc_call(
             client, MESSAGE_RPC, "get_inbox",
             params={"user_did": data["did"], "limit": 50},
@@ -182,10 +182,10 @@ async def process_inbox(
         )
         messages = inbox.get("messages", [])
         if not messages:
-            print("收件箱为空")
+            print("Inbox is empty")
             return
 
-        # 按时间和协议顺序排序
+        # Sort by time and protocol order
         messages.sort(key=lambda m: (
             m.get("created_at", ""),
             _E2EE_TYPE_ORDER.get(m.get("type"), 99),
@@ -193,7 +193,7 @@ async def process_inbox(
 
         e2ee_client: E2eeClient | None = None
 
-        # 尝试从磁盘恢复已有 E2EE 客户端
+        # Try to restore existing E2EE client from disk
         e2ee_client = _load_or_create_e2ee_client(data["did"], credential_name)
         processed_ids = []
 
@@ -207,53 +207,53 @@ async def process_inbox(
                 if msg_type == "e2ee_msg":
                     try:
                         original_type, plaintext = e2ee_client.decrypt_message(content)
-                        print(f"  [{msg_type}] 解密消息: [{original_type}] {plaintext}")
+                        print(f"  [{msg_type}] Decrypted message: [{original_type}] {plaintext}")
                     except RuntimeError as e:
-                        print(f"  [{msg_type}] 解密失败: {e}")
+                        print(f"  [{msg_type}] Decryption failed: {e}")
                 else:
                     responses = await e2ee_client.process_e2ee_message(msg_type, content)
-                    print(f"  [{msg_type}] 处理协议消息，生成 {len(responses)} 条响应")
+                    print(f"  [{msg_type}] Processed protocol message, generated {len(responses)} response(s)")
                     for resp_type, resp_content in responses:
                         await _send_msg(
                             client, data["did"], peer_did, resp_type, resp_content,
                             auth=auth, credential_name=credential_name,
                         )
-                        print(f"    -> 发送 {resp_type}")
+                        print(f"    -> Sent {resp_type}")
             else:
-                print(f"  [{msg_type}] 来自 {sender_did[:40]}...: {msg['content']}")
+                print(f"  [{msg_type}] From {sender_did[:40]}...: {msg['content']}")
 
             processed_ids.append(msg["id"])
 
-        # 标记已读
+        # Mark as read
         if processed_ids:
             await authenticated_rpc_call(
                 client, MESSAGE_RPC, "mark_read",
                 params={"user_did": data["did"], "message_ids": processed_ids},
                 auth=auth, credential_name=credential_name,
             )
-            print(f"\n已标记 {len(processed_ids)} 条消息为已读")
+            print(f"\nMarked {len(processed_ids)} message(s) as read")
 
         if e2ee_client and e2ee_client.has_active_session(peer_did):
-            print(f"\nE2EE 会话状态: ACTIVE (与 {peer_did})")
+            print(f"\nE2EE session status: ACTIVE (with {peer_did})")
 
-        # 保存 E2EE 客户端状态到磁盘
+        # Save E2EE client state to disk
         if e2ee_client is not None:
             _save_e2ee_client(e2ee_client, credential_name)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="E2EE 端到端加密消息（HPKE 方案）")
+    parser = argparse.ArgumentParser(description="E2EE end-to-end encrypted messaging (HPKE scheme)")
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--handshake", type=str, help="向指定 DID 发起 E2EE 会话")
-    group.add_argument("--send", type=str, help="向指定 DID 发送加密消息")
+    group.add_argument("--handshake", type=str, help="Initiate E2EE session with a specific DID")
+    group.add_argument("--send", type=str, help="Send encrypted message to a specific DID")
     group.add_argument("--process", action="store_true",
-                       help="处理收件箱中的 E2EE 消息")
+                       help="Process E2EE messages in inbox")
 
-    parser.add_argument("--content", type=str, help="消息内容（--send 时必需）")
+    parser.add_argument("--content", type=str, help="Message content (required with --send)")
     parser.add_argument("--peer", type=str,
-                        help="对端 DID（--process 时必需）")
+                        help="Peer DID (required with --process)")
     parser.add_argument("--credential", type=str, default="default",
-                        help="凭证名称（默认: default）")
+                        help="Credential name (default: default)")
 
     args = parser.parse_args()
 
@@ -261,11 +261,11 @@ def main() -> None:
         asyncio.run(initiate_handshake(args.handshake, args.credential))
     elif args.send:
         if not args.content:
-            parser.error("发送加密消息需要 --content")
+            parser.error("Sending encrypted message requires --content")
         asyncio.run(send_encrypted(args.send, args.content, args.credential))
     elif args.process:
         if not args.peer:
-            parser.error("处理收件箱需要 --peer")
+            parser.error("Processing inbox requires --peer")
         asyncio.run(process_inbox(args.peer, args.credential))
 
 

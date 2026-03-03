@@ -1,12 +1,12 @@
-"""SDK 配置。
+"""SDK configuration.
 
-[INPUT]: 无（纯数据类）
+[INPUT]: None (pure data class)
 [OUTPUT]: SDKConfig dataclass
-[POS]: 集中管理服务地址和域名配置
+[POS]: Centralized management of service URLs and domain configuration
 
 [PROTOCOL]:
-1. 逻辑变更时同步更新此头部
-2. 更新后检查所在文件夹的 CLAUDE.md
+1. Update this header when logic changes
+2. Check the folder's CLAUDE.md after updates
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True, slots=True)
 class SDKConfig:
-    """awiki 系统服务配置。"""
+    """awiki system service configuration."""
 
     user_service_url: str = field(
         default_factory=lambda: os.environ.get(

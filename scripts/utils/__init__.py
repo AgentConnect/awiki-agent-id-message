@@ -1,15 +1,15 @@
-"""awiki-sdk：DID 身份创建、WBA 认证、JWT 获取、WebSocket 客户端的通用 SDK。
+"""awiki-sdk: General SDK for DID identity creation, WBA authentication, JWT acquisition, and WebSocket client.
 
-[INPUT]: ANP 库
-[OUTPUT]: 公共 API（DIDIdentity, create_identity, register_did, WsClient, ...）
-[POS]: 包入口，集中导出所有公共接口
+[INPUT]: ANP library
+[OUTPUT]: Public API (DIDIdentity, create_identity, register_did, WsClient, ...)
+[POS]: Package entry point, centralizes export of all public interfaces
 
 [PROTOCOL]:
-1. 逻辑变更时同步更新此头部
-2. 更新后检查所在文件夹的 CLAUDE.md
+1. Update this header when logic changes
+2. Check the folder's CLAUDE.md after updates
 """
 
-# 核心类型
+# Core types
 from utils.config import SDKConfig
 from utils.identity import DIDIdentity, create_identity, load_private_key
 from utils.auth import (

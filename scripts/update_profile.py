@@ -1,25 +1,25 @@
-"""更新 DID Profile（昵称、简介、标签等）。
+"""Update DID Profile (nickname, bio, tags, etc.).
 
-用法：
-    # 更新昵称
-    uv run python scripts/update_profile.py --nick-name "DID达人"
+Usage:
+    # Update nickname
+    uv run python scripts/update_profile.py --nick-name "DID Pro"
 
-    # 更新多个字段
-    uv run python scripts/update_profile.py \
-        --nick-name "DID达人" \
-        --bio "去中心化身份爱好者" \
+    # Update multiple fields
+    uv run python scripts/update_profile.py \\
+        --nick-name "DID Pro" \\
+        --bio "Decentralized identity enthusiast" \\
         --tags "developer,did,agent"
 
-    # 更新 Profile Markdown
+    # Update Profile Markdown
     uv run python scripts/update_profile.py --profile-md "# About Me\n\nI am an agent."
 
-[INPUT]: SDK（RPC 调用）、credential_store（加载身份凭证）
-[OUTPUT]: 更新后的 Profile 信息
-[POS]: Profile 更新脚本
+[INPUT]: SDK (RPC calls), credential_store (load identity credentials)
+[OUTPUT]: Updated Profile information
+[POS]: Profile update script
 
 [PROTOCOL]:
-1. 逻辑变更时同步更新此头部
-2. 更新后检查所在文件夹的 CLAUDE.md
+1. Update this header when logic changes
+2. Check the folder's CLAUDE.md after updating
 """
 
 import argparse
@@ -42,7 +42,7 @@ async def update_profile(
     tags: list[str] | None = None,
     profile_md: str | None = None,
 ) -> None:
-    """更新自己的 Profile。"""
+    """Update own Profile."""
     params: dict = {}
     if nick_name is not None:
         params["nick_name"] = nick_name
@@ -54,14 +54,14 @@ async def update_profile(
         params["profile_md"] = profile_md
 
     if not params:
-        print("请至少指定一个要更新的字段")
-        print("可用字段: --nick-name, --bio, --tags, --profile-md")
+        print("Please specify at least one field to update")
+        print("Available fields: --nick-name, --bio, --tags, --profile-md")
         sys.exit(1)
 
     config = SDKConfig()
     auth_result = create_authenticator(credential_name, config)
     if auth_result is None:
-        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
+        print(f"Credential '{credential_name}' unavailable; please create an identity first")
         sys.exit(1)
 
     auth, _ = auth_result
@@ -70,18 +70,18 @@ async def update_profile(
             client, PROFILE_RPC, "update_me", params,
             auth=auth, credential_name=credential_name,
         )
-        print("Profile 更新成功:")
+        print("Profile updated successfully:")
         print(json.dumps(updated, indent=2, ensure_ascii=False))
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="更新 DID Profile")
-    parser.add_argument("--nick-name", type=str, help="昵称")
-    parser.add_argument("--bio", type=str, help="个人简介")
-    parser.add_argument("--tags", type=str, help="标签（逗号分隔）")
-    parser.add_argument("--profile-md", type=str, help="Profile Markdown 内容")
+    parser = argparse.ArgumentParser(description="Update DID Profile")
+    parser.add_argument("--nick-name", type=str, help="Nickname")
+    parser.add_argument("--bio", type=str, help="Bio")
+    parser.add_argument("--tags", type=str, help="Tags (comma-separated)")
+    parser.add_argument("--profile-md", type=str, help="Profile Markdown content")
     parser.add_argument("--credential", type=str, default="default",
-                        help="凭证名称（默认: default）")
+                        help="Credential name (default: default)")
 
     args = parser.parse_args()
 

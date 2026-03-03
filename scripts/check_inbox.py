@@ -1,25 +1,25 @@
-"""检查收件箱、查看聊天历史、标记已读。
+"""Check inbox, view chat history, mark messages as read.
 
-用法：
-    # 查看收件箱
+Usage:
+    # View inbox
     uv run python scripts/check_inbox.py
 
-    # 限制返回数量
+    # Limit result count
     uv run python scripts/check_inbox.py --limit 5
 
-    # 查看与指定 DID 的聊天历史
+    # View chat history with a specific DID
     uv run python scripts/check_inbox.py --history "did:wba:localhost:user:abc123"
 
-    # 标记消息为已读
+    # Mark messages as read
     uv run python scripts/check_inbox.py --mark-read msg_id_1 msg_id_2
 
-[INPUT]: SDK（RPC 调用）、credential_store（加载身份凭证）
-[OUTPUT]: 收件箱消息列表 / 聊天历史 / 标记已读结果
-[POS]: 消息接收与处理脚本
+[INPUT]: SDK (RPC calls), credential_store (load identity credentials)
+[OUTPUT]: Inbox message list / chat history / mark-read result
+[POS]: Message receiving and processing script
 
 [PROTOCOL]:
-1. 逻辑变更时同步更新此头部
-2. 更新后检查所在文件夹的 CLAUDE.md
+1. Update this header when logic changes
+2. Check the folder's CLAUDE.md after updating
 """
 
 import argparse
@@ -36,11 +36,11 @@ MESSAGE_RPC = "/message/rpc"
 
 
 async def check_inbox(credential_name: str = "default", limit: int = 20) -> None:
-    """查看收件箱。"""
+    """View inbox."""
     config = SDKConfig()
     auth_result = create_authenticator(credential_name, config)
     if auth_result is None:
-        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
+        print(f"Credential '{credential_name}' unavailable; please create an identity first")
         sys.exit(1)
 
     auth, data = auth_result
@@ -61,11 +61,11 @@ async def get_history(
     credential_name: str = "default",
     limit: int = 50,
 ) -> None:
-    """查看与指定 DID 的聊天历史。"""
+    """View chat history with a specific DID."""
     config = SDKConfig()
     auth_result = create_authenticator(credential_name, config)
     if auth_result is None:
-        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
+        print(f"Credential '{credential_name}' unavailable; please create an identity first")
         sys.exit(1)
 
     auth, data = auth_result
@@ -89,11 +89,11 @@ async def mark_read(
     message_ids: list[str],
     credential_name: str = "default",
 ) -> None:
-    """标记消息为已读。"""
+    """Mark messages as read."""
     config = SDKConfig()
     auth_result = create_authenticator(credential_name, config)
     if auth_result is None:
-        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
+        print(f"Credential '{credential_name}' unavailable; please create an identity first")
         sys.exit(1)
 
     auth, data = auth_result
@@ -109,19 +109,19 @@ async def mark_read(
             auth=auth,
             credential_name=credential_name,
         )
-        print("标记已读成功:")
+        print("Marked as read successfully:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="检查收件箱和消息管理")
-    parser.add_argument("--history", type=str, help="查看与指定 DID 的聊天历史")
+    parser = argparse.ArgumentParser(description="Check inbox and manage messages")
+    parser.add_argument("--history", type=str, help="View chat history with a specific DID")
     parser.add_argument("--mark-read", nargs="+", type=str,
-                        help="标记指定消息 ID 为已读")
+                        help="Mark specified message IDs as read")
     parser.add_argument("--limit", type=int, default=20,
-                        help="返回数量限制（默认: 20）")
+                        help="Result count limit (default: 20)")
     parser.add_argument("--credential", type=str, default="default",
-                        help="凭证名称（默认: default）")
+                        help="Credential name (default: default)")
 
     args = parser.parse_args()
 

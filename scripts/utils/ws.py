@@ -1,12 +1,12 @@
-"""WebSocket 客户端封装（连接 molt-message WebSocket 端点）。
+"""WebSocket client wrapper (connects to molt-message WebSocket endpoint).
 
-[INPUT]: SDKConfig, DIDIdentity（JWT token）
-[OUTPUT]: WsClient 类（连接/发送/接收/关闭）
-[POS]: 为上层应用和测试提供 WebSocket 消息通道的客户端封装
+[INPUT]: SDKConfig, DIDIdentity (JWT token)
+[OUTPUT]: WsClient class (connect/send/receive/close)
+[POS]: Provides WebSocket message channel client wrapper for upper-layer applications and tests
 
 [PROTOCOL]:
-1. 逻辑变更时同步更新此头部
-2. 更新后检查所在文件夹的 CLAUDE.md
+1. Update this header when logic changes
+2. Check the folder's CLAUDE.md after updates
 """
 
 from __future__ import annotations
@@ -26,21 +26,21 @@ logger = logging.getLogger(__name__)
 
 
 class WsClient:
-    """molt-message WebSocket 客户端。
+    """molt-message WebSocket client.
 
-    使用 JWT Bearer 认证连接 WebSocket 端点，
-    支持发送 JSON-RPC 请求和接收推送通知。
+    Uses JWT Bearer authentication to connect to the WebSocket endpoint,
+    supporting JSON-RPC request sending and push notification receiving.
 
-    用法::
+    Usage::
 
         async with WsClient(config, identity) as ws:
-            # 发送消息
+            # Send a message
             result = await ws.send_message(
                 receiver_did="did:wba:...",
                 content="Hello!",
             )
 
-            # 接收推送
+            # Receive push notifications
             notification = await ws.receive(timeout=5.0)
     """
 
@@ -55,23 +55,23 @@ class WsClient:
         self._request_id = 0
 
     async def connect(self) -> None:
-        """建立 WebSocket 连接。
+        """Establish WebSocket connection.
 
-        使用 JWT token 通过 query parameter 认证（兼容性最好）。
+        Uses JWT token via query parameter for authentication (best compatibility).
         """
         if not self._identity.jwt_token:
-            raise ValueError("identity 缺少 jwt_token，请先调用 get_jwt_via_wba")
+            raise ValueError("identity missing jwt_token, call get_jwt_via_wba first")
 
-        # 将 HTTP URL 转为 WebSocket URL
+        # Convert HTTP URL to WebSocket URL
         base_url = self._config.molt_message_url
         ws_url = base_url.replace("http://", "ws://").replace("https://", "wss://")
         url = f"{ws_url}/message/ws?token={self._identity.jwt_token}"
 
         self._conn = await websockets.connect(url)
-        logger.info("[WsClient] 已连接 %s", url.split("?")[0])
+        logger.info("[WsClient] Connected to %s", url.split("?")[0])
 
     async def close(self) -> None:
-        """关闭连接。"""
+        """Close the connection."""
         if self._conn:
             await self._conn.close()
             self._conn = None
@@ -92,20 +92,20 @@ class WsClient:
         method: str,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """发送 JSON-RPC 请求并等待响应。
+        """Send a JSON-RPC request and wait for the response.
 
         Args:
-            method: RPC 方法名。
-            params: 方法参数。
+            method: RPC method name.
+            params: Method parameters.
 
         Returns:
-            JSON-RPC result 字段内容。
+            JSON-RPC result field content.
 
         Raises:
-            RuntimeError: 未连接或收到错误响应。
+            RuntimeError: Not connected or received an error response.
         """
         if not self._conn:
-            raise RuntimeError("WebSocket 未连接")
+            raise RuntimeError("WebSocket not connected")
 
         req_id = self._next_id()
         request: dict[str, Any] = {
@@ -118,12 +118,12 @@ class WsClient:
 
         await self._conn.send(json.dumps(request))
 
-        # 等待匹配的响应（跳过中间收到的推送通知）
+        # Wait for the matching response (skip push notifications received in between)
         while True:
             raw = await self._conn.recv()
             data = json.loads(raw)
 
-            # 跳过通知（无 id 字段）
+            # Skip notifications (no id field)
             if "id" not in data:
                 continue
 
@@ -146,12 +146,12 @@ class WsClient:
         group_id: str | None = None,
         msg_type: str = "text",
     ) -> dict[str, Any]:
-        """发送消息的便捷方法。
+        """Convenience method for sending messages.
 
-        sender_did 由服务端自动注入。
+        sender_did is automatically injected by the server.
 
         Returns:
-            消息响应 dict。
+            Message response dict.
         """
         params: dict[str, Any] = {"content": content, "type": msg_type}
         if receiver_did:
@@ -165,9 +165,9 @@ class WsClient:
         return await self.send_rpc("send", params)
 
     async def ping(self) -> bool:
-        """发送应用层心跳并等待 pong。"""
+        """Send an application-layer heartbeat and wait for pong."""
         if not self._conn:
-            raise RuntimeError("WebSocket 未连接")
+            raise RuntimeError("WebSocket not connected")
 
         await self._conn.send(json.dumps({"jsonrpc": "2.0", "method": "ping"}))
         raw = await self._conn.recv()
@@ -175,16 +175,16 @@ class WsClient:
         return data.get("method") == "pong"
 
     async def receive(self, timeout: float = 10.0) -> dict[str, Any] | None:
-        """接收一条消息（请求响应或推送通知）。
+        """Receive a single message (request response or push notification).
 
         Args:
-            timeout: 超时秒数。
+            timeout: Timeout in seconds.
 
         Returns:
-            JSON 消息 dict，超时返回 None。
+            JSON message dict, or None on timeout.
         """
         if not self._conn:
-            raise RuntimeError("WebSocket 未连接")
+            raise RuntimeError("WebSocket not connected")
 
         try:
             raw = await asyncio.wait_for(self._conn.recv(), timeout=timeout)
@@ -193,16 +193,16 @@ class WsClient:
             return None
 
     async def receive_notification(self, timeout: float = 10.0) -> dict[str, Any] | None:
-        """接收一条推送通知（跳过请求响应）。
+        """Receive a single push notification (skipping request responses).
 
         Args:
-            timeout: 超时秒数。
+            timeout: Timeout in seconds.
 
         Returns:
-            JSON-RPC Notification dict，超时返回 None。
+            JSON-RPC Notification dict, or None on timeout.
         """
         if not self._conn:
-            raise RuntimeError("WebSocket 未连接")
+            raise RuntimeError("WebSocket not connected")
 
         deadline = asyncio.get_event_loop().time() + timeout
         while True:
@@ -212,7 +212,7 @@ class WsClient:
             try:
                 raw = await asyncio.wait_for(self._conn.recv(), timeout=remaining)
                 data = json.loads(raw)
-                # 通知没有 id 字段
+                # Notifications have no id field
                 if "id" not in data:
                     return data
             except asyncio.TimeoutError:

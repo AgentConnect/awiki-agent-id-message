@@ -1,12 +1,12 @@
-"""JSON-RPC 2.0 客户端辅助函数。
+"""JSON-RPC 2.0 client helper functions.
 
-[INPUT]: httpx.AsyncClient, 端点路径, 方法名, 参数, DIDWbaAuthHeader
-[OUTPUT]: rpc_call() 辅助函数, authenticated_rpc_call() 带 401 重试, JsonRpcError 异常类
-[POS]: 为 auth.py 和外部调用者提供统一的 JSON-RPC 调用封装
+[INPUT]: httpx.AsyncClient, endpoint path, method name, params, DIDWbaAuthHeader
+[OUTPUT]: rpc_call() helper, authenticated_rpc_call() with 401 retry, JsonRpcError exception class
+[POS]: Provides unified JSON-RPC call wrappers for auth.py and external callers
 
 [PROTOCOL]:
-1. 逻辑变更时同步更新此头部
-2. 更新后检查所在文件夹的 CLAUDE.md
+1. Update this header when logic changes
+2. Check the folder's CLAUDE.md after updates
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import httpx
 
 
 class JsonRpcError(Exception):
-    """JSON-RPC 错误响应异常。"""
+    """JSON-RPC error response exception."""
 
     def __init__(self, code: int, message: str, data: Any = None):
         self.code = code
@@ -33,21 +33,21 @@ async def rpc_call(
     params: dict | None = None,
     request_id: int | str = 1,
 ) -> Any:
-    """发送 JSON-RPC 2.0 请求并返回 result。
+    """Send a JSON-RPC 2.0 request and return the result.
 
     Args:
-        client: httpx 异步客户端。
-        endpoint: RPC 端点路径（如 "/did-auth/rpc"）。
-        method: RPC 方法名（如 "register"）。
-        params: 方法参数。
-        request_id: 请求 ID。
+        client: httpx async client.
+        endpoint: RPC endpoint path (e.g., "/did-auth/rpc").
+        method: RPC method name (e.g., "register").
+        params: Method parameters.
+        request_id: Request ID.
 
     Returns:
-        JSON-RPC result 字段的值。
+        Value of the JSON-RPC result field.
 
     Raises:
-        JsonRpcError: 服务端返回 JSON-RPC error 时。
-        httpx.HTTPStatusError: HTTP 层错误时。
+        JsonRpcError: When the server returns a JSON-RPC error.
+        httpx.HTTPStatusError: On HTTP layer errors.
     """
     payload = {
         "jsonrpc": "2.0",
@@ -85,26 +85,26 @@ async def authenticated_rpc_call(
     auth: Any = None,
     credential_name: str = "default",
 ) -> Any:
-    """带 401 自动重试的 JSON-RPC 2.0 请求。
+    """JSON-RPC 2.0 request with automatic 401 retry.
 
-    使用 DIDWbaAuthHeader 管理认证头和 token 缓存。
-    401 时自动清除过期 token 并重新生成 DIDWba 认证头重试。
+    Uses DIDWbaAuthHeader to manage authentication headers and token caching.
+    On 401, automatically clears the expired token and regenerates DIDWba auth header to retry.
 
     Args:
-        client: httpx 异步客户端（已设置 base_url）。
-        endpoint: RPC 端点路径。
-        method: RPC 方法名。
-        params: 方法参数。
-        request_id: 请求 ID。
-        auth: DIDWbaAuthHeader 实例。
-        credential_name: 凭证名称（用于持久化新 JWT）。
+        client: httpx async client (with base_url set).
+        endpoint: RPC endpoint path.
+        method: RPC method name.
+        params: Method parameters.
+        request_id: Request ID.
+        auth: DIDWbaAuthHeader instance.
+        credential_name: Credential name (for persisting new JWT).
 
     Returns:
-        JSON-RPC result 字段的值。
+        Value of the JSON-RPC result field.
 
     Raises:
-        JsonRpcError: 服务端返回 JSON-RPC error 时。
-        httpx.HTTPStatusError: HTTP 层错误时（非 401）。
+        JsonRpcError: When the server returns a JSON-RPC error.
+        httpx.HTTPStatusError: On HTTP layer errors (non-401).
     """
     server_url = str(client.base_url)
     payload = {
@@ -114,11 +114,11 @@ async def authenticated_rpc_call(
         "id": request_id,
     }
 
-    # 获取认证头
+    # Get authentication headers
     auth_headers = auth.get_auth_header(server_url)
     resp = await client.post(endpoint, json=payload, headers=auth_headers)
 
-    # 401 → 清除过期 token → 重新认证 → 重试
+    # 401 -> clear expired token -> re-authenticate -> retry
     if resp.status_code == 401:
         auth.clear_token(server_url)
         auth_headers = auth.get_auth_header(server_url, force_new=True)
@@ -126,8 +126,8 @@ async def authenticated_rpc_call(
 
     resp.raise_for_status()
 
-    # 成功：从响应头缓存新 token
-    # 注意：httpx 响应头 key 为小写，DIDWbaAuthHeader.update_token() 期望 "Authorization"
+    # Success: cache new token from response headers
+    # Note: httpx response header keys are lowercase, DIDWbaAuthHeader.update_token() expects "Authorization"
     auth_header_value = resp.headers.get("authorization", "")
     new_token = auth.update_token(server_url, {"Authorization": auth_header_value})
     if new_token:

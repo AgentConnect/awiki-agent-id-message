@@ -1,14 +1,16 @@
-"""E2EE 端到端加密客户端（封装 ANP e2e_encryption_hpke）。
+"""E2EE end-to-end encryption client (wraps ANP e2e_encryption_hpke).
 
 [INPUT]: ANP E2eeHpkeSession / HpkeKeyManager / detect_message_type, local_did,
          signing_pem (secp256r1 key-2), x25519_pem (key-3)
-[OUTPUT]: E2eeClient 类，提供一步初始化、加密、解密、状态导出/恢复的高层 API
-[POS]: 封装 ANP 底层 HPKE E2EE 协议（RFC 9180 + 链式 Ratchet），为上层应用提供简洁的加解密接口；
-       支持跨进程状态持久化
+[OUTPUT]: E2eeClient class providing high-level API for one-step initialization,
+          encryption, decryption, and state export/restore
+[POS]: Wraps ANP's underlying HPKE E2EE protocol (RFC 9180 + Chain Ratchet) to provide
+       a simple encrypt/decrypt interface for upper-layer applications;
+       supports cross-process state persistence
 
 [PROTOCOL]:
-1. 逻辑变更时同步更新此头部
-2. 更新后检查所在文件夹的 CLAUDE.md
+1. Update this header when logic changes
+2. Check the folder's CLAUDE.md after updates
 """
 
 from __future__ import annotations
@@ -40,22 +42,22 @@ from anp.authentication import resolve_did_wba_document
 
 logger = logging.getLogger(__name__)
 
-# 状态版本标记，用于区分旧格式
+# State version marker, used to distinguish from old formats
 _STATE_VERSION = "hpke_v1"
 
 
 class E2eeClient:
-    """E2EE 端到端加密客户端（HPKE 方案）。
+    """E2EE end-to-end encryption client (HPKE scheme).
 
-    封装 ANP ``E2eeHpkeSession`` 和 ``HpkeKeyManager``，提供：
-    - 一步会话初始化（无多步握手）
-    - 消息加密与解密（链式 Ratchet 前向安全）
-    - 过期会话清理
+    Wraps ANP ``E2eeHpkeSession`` and ``HpkeKeyManager``, providing:
+    - One-step session initialization (no multi-step handshake)
+    - Message encryption and decryption (Chain Ratchet forward secrecy)
+    - Expired session cleanup
 
-    关键设计：E2EE 使用两套独立密钥——
-    - key-2 secp256r1：proof 签名（证明身份）
-    - key-3 X25519：HPKE 密钥协商
-    均与 DID 身份密钥（secp256k1 key-1）分离。
+    Key design: E2EE uses two independent key pairs --
+    - key-2 secp256r1: proof signing (identity verification)
+    - key-3 X25519: HPKE key agreement
+    Both are separate from the DID identity key (secp256k1 key-1).
     """
 
     def __init__(
@@ -65,18 +67,18 @@ class E2eeClient:
         signing_pem: str | None = None,
         x25519_pem: str | None = None,
     ) -> None:
-        """初始化 E2EE 客户端。
+        """Initialize E2EE client.
 
         Args:
-            local_did: 本地 DID 标识符。
-            signing_pem: secp256r1 签名密钥 PEM 字符串（key-2）。
-            x25519_pem: X25519 协商密钥 PEM 字符串（key-3）。
+            local_did: Local DID identifier.
+            signing_pem: secp256r1 signing key PEM string (key-2).
+            x25519_pem: X25519 agreement key PEM string (key-3).
         """
         self.local_did = local_did
         self._signing_pem = signing_pem
         self._x25519_pem = x25519_pem
 
-        # 加载密钥对象
+        # Load key objects
         self._signing_key: ec.EllipticCurvePrivateKey | None = None
         if signing_pem is not None:
             key = load_pem_private_key(signing_pem.encode("utf-8"), password=None)
@@ -94,35 +96,36 @@ class E2eeClient:
     async def initiate_handshake(
         self, peer_did: str
     ) -> tuple[str, dict[str, Any]]:
-        """发起 E2EE 会话（一步初始化）。
+        """Initiate an E2EE session (one-step initialization).
 
-        获取对端 DID 文档中的 X25519 公钥，然后创建会话并发送 e2ee_init。
-        发送后会话立即 ACTIVE，无需等待对方响应。
+        Retrieves the peer's X25519 public key from their DID document, then creates
+        a session and sends e2ee_init. The session becomes ACTIVE immediately after
+        sending, no response from the peer is needed.
 
         Args:
-            peer_did: 对端 DID 标识符。
+            peer_did: Peer DID identifier.
 
         Returns:
-            ``(msg_type, content_dict)`` 元组，msg_type 为 ``"e2ee_init"``。
+            ``(msg_type, content_dict)`` tuple, where msg_type is ``"e2ee_init"``.
 
         Raises:
-            RuntimeError: 缺少必要的密钥或无法获取对端 DID 文档。
+            RuntimeError: Missing required keys or unable to retrieve peer DID document.
         """
         if self._signing_key is None or self._x25519_key is None:
-            raise RuntimeError("缺少 E2EE 密钥（signing_pem 或 x25519_pem），请重新创建身份")
+            raise RuntimeError("Missing E2EE keys (signing_pem or x25519_pem), please recreate identity")
 
-        # 获取对端 DID 文档
+        # Retrieve peer DID document
         peer_doc = await resolve_did_wba_document(peer_did)
         if peer_doc is None:
-            raise RuntimeError(f"无法获取对端 DID 文档: {peer_did}")
+            raise RuntimeError(f"Unable to retrieve peer DID document: {peer_did}")
 
-        # 提取对端 X25519 公钥
+        # Extract peer X25519 public key
         peer_pk, peer_key_id = extract_x25519_public_key_from_did_document(peer_doc)
 
-        # 确定本地签名验证方法 ID
+        # Determine local signing verification method ID
         signing_vm = f"{self.local_did}#key-2"
 
-        # 确定本地 X25519 key ID
+        # Determine local X25519 key ID
         local_x25519_key_id = f"{self.local_did}#key-3"
 
         session = E2eeHpkeSession(
@@ -136,7 +139,7 @@ class E2eeClient:
 
         msg_type, content = session.initiate_session(peer_pk, peer_key_id)
 
-        # 一步初始化：发送后立即 ACTIVE
+        # One-step initialization: ACTIVE immediately after sending
         self._key_manager.register_session(session)
 
         return msg_type, content
@@ -144,19 +147,19 @@ class E2eeClient:
     async def process_e2ee_message(
         self, msg_type: str, content: dict[str, Any]
     ) -> list[tuple[str, dict[str, Any]]]:
-        """处理收到的 E2EE 协议消息。
+        """Process a received E2EE protocol message.
 
         Args:
-            msg_type: 消息类型（``e2ee_init`` / ``e2ee_rekey`` / ``e2ee_error``）。
-            content: 消息内容 dict。
+            msg_type: Message type (``e2ee_init`` / ``e2ee_rekey`` / ``e2ee_error``).
+            content: Message content dict.
 
         Returns:
-            需要发送的消息列表（HPKE 方案中通常为空列表，
-            因为 init/rekey 无需回复）。
+            List of messages to send (in HPKE scheme, usually an empty list
+            since init/rekey do not require a reply).
         """
         detected = detect_message_type(msg_type)
         if detected is None:
-            logger.warning("无法识别的 E2EE 消息类型: %s", msg_type)
+            logger.warning("Unrecognized E2EE message type: %s", msg_type)
             return []
 
         if detected == MessageType.E2EE_INIT:
@@ -166,74 +169,74 @@ class E2eeClient:
         elif detected == MessageType.E2EE_ERROR:
             return self._handle_error(content)
         elif detected == MessageType.E2EE_MSG:
-            logger.warning("process_e2ee_message 不处理加密消息，请使用 decrypt_message")
+            logger.warning("process_e2ee_message does not handle encrypted messages, use decrypt_message instead")
             return []
         else:
-            logger.warning("未处理的 E2EE 消息子类型: %s", detected)
+            logger.warning("Unhandled E2EE message subtype: %s", detected)
             return []
 
     def has_active_session(self, peer_did: str) -> bool:
-        """检查是否存在与指定对端的活跃加密会话。"""
+        """Check whether an active encryption session exists with the specified peer."""
         session = self._key_manager.get_active_session(self.local_did, peer_did)
         return session is not None
 
     def encrypt_message(
         self, peer_did: str, plaintext: str, original_type: str = "text"
     ) -> tuple[str, dict[str, Any]]:
-        """加密消息。
+        """Encrypt a message.
 
         Args:
-            peer_did: 对端 DID 标识符。
-            plaintext: 明文内容。
-            original_type: 原始消息类型（默认 ``"text"``）。
+            peer_did: Peer DID identifier.
+            plaintext: Plaintext content.
+            original_type: Original message type (default ``"text"``).
 
         Returns:
-            ``(msg_type, content_dict)`` 元组，msg_type 为 ``"e2ee_msg"``。
+            ``(msg_type, content_dict)`` tuple, where msg_type is ``"e2ee_msg"``.
 
         Raises:
-            RuntimeError: 没有与对端的活跃会话。
+            RuntimeError: No active session with the peer.
         """
         session = self._key_manager.get_active_session(self.local_did, peer_did)
         if session is None:
-            raise RuntimeError(f"没有与 {peer_did} 的活跃 E2EE 会话")
+            raise RuntimeError(f"No active E2EE session with {peer_did}")
         return session.encrypt_message(original_type, plaintext)
 
     def decrypt_message(self, content: dict[str, Any]) -> tuple[str, str]:
-        """解密消息。
+        """Decrypt a message.
 
-        根据 ``session_id`` 查找对应的会话并解密。
+        Finds the corresponding session by ``session_id`` and decrypts.
 
         Args:
-            content: 加密消息的 content dict（含 ``session_id``、``ciphertext`` 等）。
+            content: Encrypted message content dict (contains ``session_id``, ``ciphertext``, etc.).
 
         Returns:
-            ``(original_type, plaintext)`` 元组。
+            ``(original_type, plaintext)`` tuple.
 
         Raises:
-            RuntimeError: 找不到对应的会话。
+            RuntimeError: Cannot find the corresponding session.
         """
         session_id = content.get("session_id")
         if not session_id:
-            raise RuntimeError("消息缺少 session_id")
+            raise RuntimeError("Message missing session_id")
 
         session = self._key_manager.get_session_by_id(session_id)
         if session is None:
-            raise RuntimeError(f"找不到 session_id={session_id} 对应的会话")
+            raise RuntimeError(f"Cannot find session for session_id={session_id}")
         return session.decrypt_message(content)
 
     def cleanup_expired(self) -> None:
-        """清理过期会话。"""
+        """Clean up expired sessions."""
         self._key_manager.cleanup_expired()
 
     # ------------------------------------------------------------------
-    # 状态导出 / 恢复
+    # State export / restore
     # ------------------------------------------------------------------
 
     def export_state(self) -> dict[str, Any]:
-        """导出客户端状态（密钥 + ACTIVE 会话）。
+        """Export client state (keys + ACTIVE sessions).
 
         Returns:
-            可 JSON 序列化的 dict，用于持久化。
+            JSON-serializable dict for persistence.
         """
         sessions: list[dict[str, Any]] = []
         for session in self._key_manager._sessions_by_did_pair.values():
@@ -251,17 +254,17 @@ class E2eeClient:
 
     @classmethod
     def from_state(cls, state: dict[str, Any]) -> E2eeClient:
-        """从导出的 dict 恢复完整客户端。
+        """Restore a complete client from an exported dict.
 
         Args:
-            state: 由 ``export_state()`` 生成的 dict。
+            state: Dict generated by ``export_state()``.
 
         Returns:
-            恢复后的 ``E2eeClient`` 实例。
+            Restored ``E2eeClient`` instance.
         """
-        # 检测旧版格式：无 version 标记或版本不匹配
+        # Detect old format: no version marker or version mismatch
         if state.get("version") != _STATE_VERSION:
-            logger.info("检测到旧版 E2EE 状态格式，创建新客户端")
+            logger.info("Detected old E2EE state format, creating new client")
             return cls(
                 state["local_did"],
                 signing_pem=state.get("signing_pem"),
@@ -281,7 +284,7 @@ class E2eeClient:
 
     @staticmethod
     def _export_session(session: E2eeHpkeSession) -> dict[str, Any] | None:
-        """序列化单个 ACTIVE 会话。"""
+        """Serialize a single ACTIVE session."""
         if session.state != SessionState.ACTIVE:
             return None
         send_chain_key = session._send_chain_key
@@ -304,9 +307,9 @@ class E2eeClient:
 
     @staticmethod
     def _restore_session(data: dict[str, Any]) -> E2eeHpkeSession | None:
-        """从 dict 恢复单个 ACTIVE 会话。
+        """Restore a single ACTIVE session from a dict.
 
-        使用 ``object.__new__()`` 绕过 ``__init__``，直接设置内部属性。
+        Uses ``object.__new__()`` to bypass ``__init__`` and directly set internal attributes.
         """
         expires_at = data.get("expires_at")
         if expires_at is not None and time.time() > expires_at:
@@ -324,7 +327,7 @@ class E2eeClient:
         session._created_at = data.get("created_at", time.time())
         session._active_at = data.get("active_at")
 
-        # 恢复 SeqManager
+        # Restore SeqManager
         from anp.e2e_encryption_hpke.session import SeqManager, SeqMode
         seq_mgr = object.__new__(SeqManager)
         seq_mgr._mode = SeqMode.STRICT
@@ -335,7 +338,7 @@ class E2eeClient:
         seq_mgr._skip_key_ttl = 300
         session._seq_manager = seq_mgr
 
-        # ACTIVE 状态不再需要的属性，设置为 None 防止 AttributeError
+        # Attributes not needed in ACTIVE state, set to None to prevent AttributeError
         session._local_x25519_private_key = None
         session._local_x25519_key_id = ""
         session._signing_private_key = None
@@ -345,29 +348,29 @@ class E2eeClient:
         return session
 
     # ------------------------------------------------------------------
-    # 内部处理方法
+    # Internal handler methods
     # ------------------------------------------------------------------
 
     async def _handle_init(
         self, content: dict[str, Any]
     ) -> list[tuple[str, dict[str, Any]]]:
-        """处理 e2ee_init：获取发送方 DID 文档验证 proof，创建并激活会话。"""
+        """Handle e2ee_init: retrieve sender DID document to verify proof, create and activate session."""
         if self._signing_key is None or self._x25519_key is None:
-            logger.error("缺少 E2EE 密钥，无法处理 e2ee_init")
+            logger.error("Missing E2EE keys, cannot process e2ee_init")
             return []
 
         sender_did = content.get("sender_did", "")
         if not sender_did:
-            logger.warning("e2ee_init 消息缺少 sender_did")
+            logger.warning("e2ee_init message missing sender_did")
             return []
 
-        # 获取发送方 DID 文档
+        # Retrieve sender DID document
         sender_doc = await resolve_did_wba_document(sender_did)
         if sender_doc is None:
-            logger.warning("无法获取发送方 DID 文档: %s", sender_did)
+            logger.warning("Unable to retrieve sender DID document: %s", sender_did)
             return []
 
-        # 提取发送方签名公钥（用于验证 proof）
+        # Extract sender signing public key (for proof verification)
         proof = content.get("proof", {})
         vm_id = proof.get("verificationMethod", "")
         try:
@@ -375,10 +378,10 @@ class E2eeClient:
                 sender_doc, vm_id
             )
         except ValueError as e:
-            logger.warning("无法提取发送方签名公钥: %s", e)
+            logger.warning("Unable to extract sender signing public key: %s", e)
             return []
 
-        # 确定本地密钥 ID
+        # Determine local key IDs
         signing_vm = f"{self.local_did}#key-2"
         local_x25519_key_id = f"{self.local_did}#key-3"
 
@@ -394,39 +397,39 @@ class E2eeClient:
         try:
             session.process_init(content, sender_signing_pk)
         except (ValueError, RuntimeError) as e:
-            logger.warning("处理 e2ee_init 失败: %s", e)
+            logger.warning("Failed to process e2ee_init: %s", e)
             return []
 
-        # 注册会话（立即 ACTIVE）
+        # Register session (immediately ACTIVE)
         self._key_manager.register_session(session)
         logger.info(
-            "E2EE 会话激活（接收方）: %s <-> %s (session_id=%s)",
+            "E2EE session activated (receiver): %s <-> %s (session_id=%s)",
             session.local_did, session.peer_did, session.session_id,
         )
 
-        # HPKE 方案中 init 无需回复
+        # HPKE scheme: init does not require a reply
         return []
 
     async def _handle_rekey(
         self, content: dict[str, Any]
     ) -> list[tuple[str, dict[str, Any]]]:
-        """处理 e2ee_rekey：重建会话。"""
+        """Handle e2ee_rekey: rebuild session."""
         if self._signing_key is None or self._x25519_key is None:
-            logger.error("缺少 E2EE 密钥，无法处理 e2ee_rekey")
+            logger.error("Missing E2EE keys, cannot process e2ee_rekey")
             return []
 
         sender_did = content.get("sender_did", "")
         if not sender_did:
-            logger.warning("e2ee_rekey 消息缺少 sender_did")
+            logger.warning("e2ee_rekey message missing sender_did")
             return []
 
-        # 获取发送方 DID 文档
+        # Retrieve sender DID document
         sender_doc = await resolve_did_wba_document(sender_did)
         if sender_doc is None:
-            logger.warning("无法获取发送方 DID 文档: %s", sender_did)
+            logger.warning("Unable to retrieve sender DID document: %s", sender_did)
             return []
 
-        # 提取发送方签名公钥
+        # Extract sender signing public key
         proof = content.get("proof", {})
         vm_id = proof.get("verificationMethod", "")
         try:
@@ -434,26 +437,26 @@ class E2eeClient:
                 sender_doc, vm_id
             )
         except ValueError as e:
-            logger.warning("无法提取发送方签名公钥: %s", e)
+            logger.warning("Unable to extract sender signing public key: %s", e)
             return []
 
         signing_vm = f"{self.local_did}#key-2"
         local_x25519_key_id = f"{self.local_did}#key-3"
 
-        # 尝试获取已有会话进行 rekey
+        # Try to get existing session for rekey
         session = self._key_manager.get_active_session(self.local_did, sender_did)
         if session is not None:
             try:
                 session.process_rekey(content, sender_signing_pk)
                 self._key_manager.register_session(session)
                 logger.info(
-                    "E2EE 会话 rekey 成功: %s <-> %s", self.local_did, sender_did
+                    "E2EE session rekey successful: %s <-> %s", self.local_did, sender_did
                 )
                 return []
             except (ValueError, RuntimeError) as e:
-                logger.warning("rekey 现有会话失败，尝试创建新会话: %s", e)
+                logger.warning("Rekey of existing session failed, attempting to create new session: %s", e)
 
-        # 没有已有会话或 rekey 失败，创建新会话
+        # No existing session or rekey failed, create new session
         session = E2eeHpkeSession(
             local_did=self.local_did,
             peer_did=sender_did,
@@ -465,23 +468,23 @@ class E2eeClient:
         try:
             session.process_rekey(content, sender_signing_pk)
         except (ValueError, RuntimeError) as e:
-            logger.warning("处理 e2ee_rekey 失败: %s", e)
+            logger.warning("Failed to process e2ee_rekey: %s", e)
             return []
 
         self._key_manager.register_session(session)
         logger.info(
-            "E2EE 会话 rekey（新建）: %s <-> %s", self.local_did, sender_did
+            "E2EE session rekey (new): %s <-> %s", self.local_did, sender_did
         )
         return []
 
     def _handle_error(
         self, content: dict[str, Any]
     ) -> list[tuple[str, dict[str, Any]]]:
-        """处理 E2EE Error：记录日志，移除对应会话。"""
+        """Handle E2EE Error: log and remove the corresponding session."""
         error_code = content.get("error_code", "unknown")
         session_id = content.get("session_id", "")
         logger.warning(
-            "收到 E2EE 错误: code=%s, session_id=%s", error_code, session_id
+            "Received E2EE error: code=%s, session_id=%s", error_code, session_id
         )
         if session_id:
             session = self._key_manager.get_session_by_id(session_id)

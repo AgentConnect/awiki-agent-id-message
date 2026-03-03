@@ -1,28 +1,28 @@
-"""关注/取关/查看关系状态/列表。
+"""Follow/unfollow/view relationship status/lists.
 
-用法：
-    # 关注
+Usage:
+    # Follow
     uv run python scripts/manage_relationship.py --follow "did:wba:localhost:user:abc123"
 
-    # 取消关注
+    # Unfollow
     uv run python scripts/manage_relationship.py --unfollow "did:wba:localhost:user:abc123"
 
-    # 查看与指定 DID 的关系状态
+    # View relationship status with a specific DID
     uv run python scripts/manage_relationship.py --status "did:wba:localhost:user:abc123"
 
-    # 查看关注列表
+    # View following list
     uv run python scripts/manage_relationship.py --following
 
-    # 查看粉丝列表
+    # View followers list
     uv run python scripts/manage_relationship.py --followers
 
-[INPUT]: SDK（RPC 调用）、credential_store（加载身份凭证）
-[OUTPUT]: 关系操作结果
-[POS]: 社交关系管理脚本
+[INPUT]: SDK (RPC calls), credential_store (load identity credentials)
+[OUTPUT]: Relationship operation results
+[POS]: Social relationship management script
 
 [PROTOCOL]:
-1. 逻辑变更时同步更新此头部
-2. 更新后检查所在文件夹的 CLAUDE.md
+1. Update this header when logic changes
+2. Check the folder's CLAUDE.md after updating
 """
 
 import argparse
@@ -39,11 +39,11 @@ RPC_ENDPOINT = "/user-service/did/relationships/rpc"
 
 
 async def follow(target_did: str, credential_name: str = "default") -> None:
-    """关注指定 DID。"""
+    """Follow a specific DID."""
     config = SDKConfig()
     auth_result = create_authenticator(credential_name, config)
     if auth_result is None:
-        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
+        print(f"Credential '{credential_name}' unavailable; please create an identity first")
         sys.exit(1)
 
     auth, _ = auth_result
@@ -52,16 +52,16 @@ async def follow(target_did: str, credential_name: str = "default") -> None:
             client, RPC_ENDPOINT, "follow", {"target_did": target_did},
             auth=auth, credential_name=credential_name,
         )
-        print("关注成功:")
+        print("Follow succeeded:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 async def unfollow(target_did: str, credential_name: str = "default") -> None:
-    """取消关注指定 DID。"""
+    """Unfollow a specific DID."""
     config = SDKConfig()
     auth_result = create_authenticator(credential_name, config)
     if auth_result is None:
-        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
+        print(f"Credential '{credential_name}' unavailable; please create an identity first")
         sys.exit(1)
 
     auth, _ = auth_result
@@ -70,16 +70,16 @@ async def unfollow(target_did: str, credential_name: str = "default") -> None:
             client, RPC_ENDPOINT, "unfollow", {"target_did": target_did},
             auth=auth, credential_name=credential_name,
         )
-        print("取关成功:")
+        print("Unfollow succeeded:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 async def get_status(target_did: str, credential_name: str = "default") -> None:
-    """查看与指定 DID 的关系状态。"""
+    """View relationship status with a specific DID."""
     config = SDKConfig()
     auth_result = create_authenticator(credential_name, config)
     if auth_result is None:
-        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
+        print(f"Credential '{credential_name}' unavailable; please create an identity first")
         sys.exit(1)
 
     auth, _ = auth_result
@@ -88,7 +88,7 @@ async def get_status(target_did: str, credential_name: str = "default") -> None:
             client, RPC_ENDPOINT, "get_status", {"target_did": target_did},
             auth=auth, credential_name=credential_name,
         )
-        print("关系状态:")
+        print("Relationship status:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
@@ -97,11 +97,11 @@ async def get_following(
     limit: int = 50,
     offset: int = 0,
 ) -> None:
-    """查看关注列表。"""
+    """View following list."""
     config = SDKConfig()
     auth_result = create_authenticator(credential_name, config)
     if auth_result is None:
-        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
+        print(f"Credential '{credential_name}' unavailable; please create an identity first")
         sys.exit(1)
 
     auth, _ = auth_result
@@ -111,7 +111,7 @@ async def get_following(
             {"limit": limit, "offset": offset},
             auth=auth, credential_name=credential_name,
         )
-        print("关注列表:")
+        print("Following list:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
@@ -120,11 +120,11 @@ async def get_followers(
     limit: int = 50,
     offset: int = 0,
 ) -> None:
-    """查看粉丝列表。"""
+    """View followers list."""
     config = SDKConfig()
     auth_result = create_authenticator(credential_name, config)
     if auth_result is None:
-        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
+        print(f"Credential '{credential_name}' unavailable; please create an identity first")
         sys.exit(1)
 
     auth, _ = auth_result
@@ -134,25 +134,25 @@ async def get_followers(
             {"limit": limit, "offset": offset},
             auth=auth, credential_name=credential_name,
         )
-        print("粉丝列表:")
+        print("Followers list:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="社交关系管理")
+    parser = argparse.ArgumentParser(description="Social relationship management")
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--follow", type=str, help="关注指定 DID")
-    group.add_argument("--unfollow", type=str, help="取消关注指定 DID")
-    group.add_argument("--status", type=str, help="查看与指定 DID 的关系状态")
-    group.add_argument("--following", action="store_true", help="查看关注列表")
-    group.add_argument("--followers", action="store_true", help="查看粉丝列表")
+    group.add_argument("--follow", type=str, help="Follow a specific DID")
+    group.add_argument("--unfollow", type=str, help="Unfollow a specific DID")
+    group.add_argument("--status", type=str, help="View relationship status with a specific DID")
+    group.add_argument("--following", action="store_true", help="View following list")
+    group.add_argument("--followers", action="store_true", help="View followers list")
 
     parser.add_argument("--credential", type=str, default="default",
-                        help="凭证名称（默认: default）")
+                        help="Credential name (default: default)")
     parser.add_argument("--limit", type=int, default=50,
-                        help="列表返回数量（默认: 50）")
+                        help="List result count (default: 50)")
     parser.add_argument("--offset", type=int, default=0,
-                        help="列表偏移量（默认: 0）")
+                        help="List offset (default: 0)")
 
     args = parser.parse_args()
 

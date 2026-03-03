@@ -1,25 +1,25 @@
-"""创建群组/邀请/加入/查看成员。
+"""Create group/invite/join/view members.
 
-用法：
-    # 创建群组
-    uv run python scripts/manage_group.py --create --group-name "技术交流群" --description "讨论技术话题"
+Usage:
+    # Create a group
+    uv run python scripts/manage_group.py --create --group-name "Tech Discussion" --description "Discuss tech topics"
 
-    # 邀请用户加入群组
+    # Invite a user to join a group
     uv run python scripts/manage_group.py --invite --group-id GROUP_ID --target-did "did:wba:..."
 
-    # 加入群组（通过邀请 ID）
+    # Join a group (via invite ID)
     uv run python scripts/manage_group.py --join --group-id GROUP_ID --invite-id INVITE_ID
 
-    # 查看群组成员
+    # View group members
     uv run python scripts/manage_group.py --members --group-id GROUP_ID
 
-[INPUT]: SDK（RPC 调用）、credential_store（加载身份凭证）
-[OUTPUT]: 群组操作结果
-[POS]: 群组管理脚本
+[INPUT]: SDK (RPC calls), credential_store (load identity credentials)
+[OUTPUT]: Group operation results
+[POS]: Group management script
 
 [PROTOCOL]:
-1. 逻辑变更时同步更新此头部
-2. 更新后检查所在文件夹的 CLAUDE.md
+1. Update this header when logic changes
+2. Check the folder's CLAUDE.md after updating
 """
 
 import argparse
@@ -42,7 +42,7 @@ async def create_group(
     is_public: bool = True,
     credential_name: str = "default",
 ) -> None:
-    """创建群组。"""
+    """Create a group."""
     params: dict = {
         "name": group_name,
         "max_members": max_members,
@@ -54,7 +54,7 @@ async def create_group(
     config = SDKConfig()
     auth_result = create_authenticator(credential_name, config)
     if auth_result is None:
-        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
+        print(f"Credential '{credential_name}' unavailable; please create an identity first")
         sys.exit(1)
 
     auth, _ = auth_result
@@ -63,7 +63,7 @@ async def create_group(
             client, RPC_ENDPOINT, "create_group", params,
             auth=auth, credential_name=credential_name,
         )
-        print("群组创建成功:")
+        print("Group created successfully:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
@@ -72,11 +72,11 @@ async def invite_to_group(
     target_did: str,
     credential_name: str = "default",
 ) -> None:
-    """邀请用户加入群组。"""
+    """Invite a user to join a group."""
     config = SDKConfig()
     auth_result = create_authenticator(credential_name, config)
     if auth_result is None:
-        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
+        print(f"Credential '{credential_name}' unavailable; please create an identity first")
         sys.exit(1)
 
     auth, _ = auth_result
@@ -86,7 +86,7 @@ async def invite_to_group(
             {"group_id": group_id, "target_did": target_did},
             auth=auth, credential_name=credential_name,
         )
-        print("邀请发送成功:")
+        print("Invitation sent successfully:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
@@ -95,11 +95,11 @@ async def join_group(
     invite_id: str,
     credential_name: str = "default",
 ) -> None:
-    """通过邀请加入群组。"""
+    """Join a group via invitation."""
     config = SDKConfig()
     auth_result = create_authenticator(credential_name, config)
     if auth_result is None:
-        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
+        print(f"Credential '{credential_name}' unavailable; please create an identity first")
         sys.exit(1)
 
     auth, _ = auth_result
@@ -109,7 +109,7 @@ async def join_group(
             {"group_id": group_id, "invite_id": invite_id},
             auth=auth, credential_name=credential_name,
         )
-        print("加入群组成功:")
+        print("Joined group successfully:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
@@ -117,11 +117,11 @@ async def get_group_members(
     group_id: str,
     credential_name: str = "default",
 ) -> None:
-    """查看群组成员。"""
+    """View group members."""
     config = SDKConfig()
     auth_result = create_authenticator(credential_name, config)
     if auth_result is None:
-        print(f"凭证 '{credential_name}' 不可用，请先创建身份")
+        print(f"Credential '{credential_name}' unavailable; please create an identity first")
         sys.exit(1)
 
     auth, _ = auth_result
@@ -131,50 +131,50 @@ async def get_group_members(
             {"group_id": group_id},
             auth=auth, credential_name=credential_name,
         )
-        print("群组成员:")
+        print("Group members:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="群组管理")
+    parser = argparse.ArgumentParser(description="Group management")
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--create", action="store_true", help="创建群组")
-    group.add_argument("--invite", action="store_true", help="邀请用户加入群组")
-    group.add_argument("--join", action="store_true", help="加入群组")
-    group.add_argument("--members", action="store_true", help="查看群组成员")
+    group.add_argument("--create", action="store_true", help="Create a group")
+    group.add_argument("--invite", action="store_true", help="Invite a user to a group")
+    group.add_argument("--join", action="store_true", help="Join a group")
+    group.add_argument("--members", action="store_true", help="View group members")
 
-    parser.add_argument("--group-name", type=str, help="群组名称（创建时必需）")
-    parser.add_argument("--description", type=str, help="群组描述")
-    parser.add_argument("--group-id", type=str, help="群组 ID")
-    parser.add_argument("--target-did", type=str, help="目标 DID（邀请时必需）")
-    parser.add_argument("--invite-id", type=str, help="邀请 ID（加入时必需）")
+    parser.add_argument("--group-name", type=str, help="Group name (required for creation)")
+    parser.add_argument("--description", type=str, help="Group description")
+    parser.add_argument("--group-id", type=str, help="Group ID")
+    parser.add_argument("--target-did", type=str, help="Target DID (required for invitation)")
+    parser.add_argument("--invite-id", type=str, help="Invite ID (required for joining)")
     parser.add_argument("--max-members", type=int, default=100,
-                        help="最大成员数（默认: 100）")
+                        help="Maximum members (default: 100)")
     parser.add_argument("--public", action="store_true", default=True,
-                        help="是否公开群组")
+                        help="Whether the group is public")
     parser.add_argument("--credential", type=str, default="default",
-                        help="凭证名称（默认: default）")
+                        help="Credential name (default: default)")
 
     args = parser.parse_args()
 
     if args.create:
         if not args.group_name:
-            parser.error("创建群组需要 --group-name")
+            parser.error("Creating a group requires --group-name")
         asyncio.run(create_group(
             args.group_name, args.description, args.max_members,
             args.public, args.credential,
         ))
     elif args.invite:
         if not args.group_id or not args.target_did:
-            parser.error("邀请需要 --group-id 和 --target-did")
+            parser.error("Invitation requires --group-id and --target-did")
         asyncio.run(invite_to_group(args.group_id, args.target_did, args.credential))
     elif args.join:
         if not args.group_id or not args.invite_id:
-            parser.error("加入群组需要 --group-id 和 --invite-id")
+            parser.error("Joining a group requires --group-id and --invite-id")
         asyncio.run(join_group(args.group_id, args.invite_id, args.credential))
     elif args.members:
         if not args.group_id:
-            parser.error("查看成员需要 --group-id")
+            parser.error("Viewing members requires --group-id")
         asyncio.run(get_group_members(args.group_id, args.credential))
 
 

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""依赖安装脚本。
+"""Dependency installation script.
 
-支持 pip 安装。
+Supports pip installation.
 
-[INPUT]: 无
-[OUTPUT]: 安装 awiki-did 所需依赖
-[POS]: 项目根目录，提供 pip 安装
+[INPUT]: None
+[OUTPUT]: Install dependencies required by awiki-did
+[POS]: Project root, provides pip installation
 
 [PROTOCOL]:
-1. 逻辑变更时同步更新此头部
-2. 更新后检查所在文件夹的 CLAUDE.md
+1. Update this header when logic changes
+2. Check the folder's CLAUDE.md after updating
 """
 
 import shutil
@@ -19,14 +19,14 @@ from pathlib import Path
 
 
 def run_command(cmd: list[str], check: bool = True) -> bool:
-    """运行命令。"""
+    """Run a command."""
     try:
         result = subprocess.run(cmd, check=check, capture_output=True, text=True)
         if result.stdout:
             print(result.stdout)
         return result.returncode == 0
     except subprocess.CalledProcessError as e:
-        print(f"命令失败: {' '.join(cmd)}")
+        print(f"Command failed: {' '.join(cmd)}")
         if e.stderr:
             print(e.stderr)
         return False
@@ -35,37 +35,37 @@ def run_command(cmd: list[str], check: bool = True) -> bool:
 
 
 def find_installer() -> tuple[str, list[str]]:
-    """查找可用的包安装器。"""
+    """Find an available package installer."""
     script_dir = Path(__file__).parent
     requirements = str(script_dir / "requirements.txt")
 
-    # 优先使用 pip
+    # Prefer pip
     if shutil.which("pip"):
         return "pip", ["pip", "install", "-r", requirements]
 
-    # 尝试使用 python -m pip
+    # Try python -m pip
     return "python-pip", [
         sys.executable, "-m", "pip", "install", "-r", requirements,
     ]
 
 
 def main() -> int:
-    """主函数。"""
+    """Main function."""
     print("=" * 50)
-    print("awiki-did Skill 依赖安装")
+    print("awiki-did Skill Dependency Installation")
     print("=" * 50)
 
     installer_name, cmd = find_installer()
-    print(f"\n使用 {installer_name} 安装依赖...")
-    print(f"执行: {' '.join(cmd)}\n")
+    print(f"\nUsing {installer_name} to install dependencies...")
+    print(f"Running: {' '.join(cmd)}\n")
 
     if run_command(cmd):
-        print("\n依赖安装成功!")
-        print("\n可以开始使用了:")
+        print("\nDependencies installed successfully!")
+        print("\nReady to use:")
         print("  python scripts/setup_identity.py --name MyAgent")
         return 0
     else:
-        print("\n依赖安装失败，请手动安装:")
+        print("\nDependency installation failed. Please install manually:")
         print("  pip install -r requirements.txt")
         return 1
 

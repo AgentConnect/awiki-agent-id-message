@@ -1,10 +1,10 @@
-"""scripts 包导出。
+"""scripts package exports.
 
-[INPUT]: 无
-[OUTPUT]: 包初始化
-[POS]: scripts 目录包入口
+[INPUT]: None
+[OUTPUT]: Package initialization
+[POS]: scripts directory package entry point
 
 [PROTOCOL]:
-1. 逻辑变更时同步更新此头部
-2. 更新后检查所在文件夹的 CLAUDE.md
+1. Update this header when logic changes
+2. Check the folder's CLAUDE.md after updating
 """

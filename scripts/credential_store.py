@@ -1,13 +1,13 @@
-"""凭证持久化：保存/加载私钥、DID、JWT 到本地文件。
+"""Credential persistence: save/load private keys, DID, JWT to local files.
 
-[INPUT]: DIDIdentity 对象, DIDWbaAuthHeader (ANP SDK)
+[INPUT]: DIDIdentity object, DIDWbaAuthHeader (ANP SDK)
 [OUTPUT]: save_identity(), load_identity(), list_identities(), delete_identity(),
          extract_auth_files(), create_authenticator()
-[POS]: 凭证管理核心模块，支持跨会话身份复用，提供 DIDWbaAuthHeader 工厂
+[POS]: Core credential management module supporting cross-session identity reuse and DIDWbaAuthHeader factory
 
 [PROTOCOL]:
-1. 逻辑变更时同步更新此头部
-2. 更新后检查所在文件夹的 CLAUDE.md
+1. Update this header when logic changes
+2. Check the folder's CLAUDE.md after updating
 """
 
 from __future__ import annotations
@@ -19,20 +19,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# 凭证存储目录（相对于 SKILL_DIR）
+# Credential storage directory (relative to SKILL_DIR)
 _CREDENTIALS_DIR = Path(__file__).resolve().parent.parent / ".credentials"
 
 
 def _ensure_credentials_dir() -> Path:
-    """确保凭证目录存在并设置权限。"""
+    """Ensure credentials directory exists with proper permissions."""
     _CREDENTIALS_DIR.mkdir(parents=True, exist_ok=True)
-    # 目录权限设为 700（仅当前用户可访问）
+    # Set directory permissions to 700 (only current user can access)
     os.chmod(_CREDENTIALS_DIR, stat.S_IRWXU)
     return _CREDENTIALS_DIR
 
 
 def _credential_path(name: str) -> Path:
-    """获取凭证文件路径。"""
+    """Get credential file path."""
     return _ensure_credentials_dir() / f"{name}.json"
 
 
@@ -49,23 +49,23 @@ def save_identity(
     e2ee_signing_private_pem: bytes | None = None,
     e2ee_agreement_private_pem: bytes | None = None,
 ) -> Path:
-    """保存 DID 身份到本地文件。
+    """Save a DID identity to a local file.
 
     Args:
-        did: DID 标识符
-        unique_id: 从 DID 提取的唯一 ID
-        user_id: 注册后的用户 ID
-        private_key_pem: PEM 编码的私钥
-        public_key_pem: PEM 编码的公钥
+        did: DID identifier
+        unique_id: Unique ID extracted from the DID
+        user_id: User ID after registration
+        private_key_pem: PEM-encoded private key
+        public_key_pem: PEM-encoded public key
         jwt_token: JWT token
-        display_name: 显示名称
-        name: 凭证名称（默认 "default"）
-        did_document: DID 文档（供 DIDWbaAuthHeader 使用）
-        e2ee_signing_private_pem: key-2 secp256r1 签名私钥 PEM
-        e2ee_agreement_private_pem: key-3 X25519 协商私钥 PEM
+        display_name: Display name
+        name: Credential name (default "default")
+        did_document: DID document (for DIDWbaAuthHeader)
+        e2ee_signing_private_pem: key-2 secp256r1 signing private key PEM
+        e2ee_agreement_private_pem: key-3 X25519 agreement private key PEM
 
     Returns:
-        凭证文件路径
+        Credential file path
     """
     credential_data: dict[str, Any] = {
         "did": did,
@@ -96,19 +96,19 @@ def save_identity(
 
     path = _credential_path(name)
     path.write_text(json.dumps(credential_data, indent=2, ensure_ascii=False))
-    # 私钥文件权限设为 600（仅当前用户可读写）
+    # Set private key file permissions to 600 (only current user can read/write)
     os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
     return path
 
 
 def load_identity(name: str = "default") -> dict[str, Any] | None:
-    """从本地文件加载 DID 身份。
+    """Load a DID identity from a local file.
 
     Args:
-        name: 凭证名称（默认 "default"）
+        name: Credential name (default "default")
 
     Returns:
-        凭证数据字典，不存在时返回 None
+        Credential data dict, or None if not found
     """
     path = _credential_path(name)
     if not path.exists():
@@ -118,10 +118,10 @@ def load_identity(name: str = "default") -> dict[str, Any] | None:
 
 
 def list_identities() -> list[dict[str, Any]]:
-    """列出所有已保存的身份。
+    """List all saved identities.
 
     Returns:
-        身份列表，每项含 name、did、created_at 等信息
+        List of identities, each containing name, did, created_at, etc.
     """
     cred_dir = _ensure_credentials_dir()
     identities = []
@@ -143,13 +143,13 @@ def list_identities() -> list[dict[str, Any]]:
 
 
 def delete_identity(name: str) -> bool:
-    """删除已保存的身份。
+    """Delete a saved identity.
 
     Args:
-        name: 凭证名称
+        name: Credential name
 
     Returns:
-        是否成功删除
+        Whether deletion was successful
     """
     path = _credential_path(name)
     if path.exists():
@@ -159,14 +159,14 @@ def delete_identity(name: str) -> bool:
 
 
 def update_jwt(name: str, jwt_token: str) -> bool:
-    """更新已保存身份的 JWT token。
+    """Update the JWT token of a saved identity.
 
     Args:
-        name: 凭证名称
-        jwt_token: 新的 JWT token
+        name: Credential name
+        jwt_token: New JWT token
 
     Returns:
-        是否成功更新
+        Whether update was successful
     """
     data = load_identity(name)
     if data is None:
@@ -179,13 +179,13 @@ def update_jwt(name: str, jwt_token: str) -> bool:
 
 
 def extract_auth_files(name: str = "default") -> tuple[Path, Path] | None:
-    """从凭证中提取 DID 文档和私钥文件供 DIDWbaAuthHeader 使用。
+    """Extract DID document and private key files from credential for DIDWbaAuthHeader.
 
     Args:
-        name: 凭证名称
+        name: Credential name
 
     Returns:
-        (did_doc_path, key_path) 元组，凭证不存在或缺少 DID 文档时返回 None
+        (did_doc_path, key_path) tuple, or None if credential is missing or has no DID document
     """
     data = load_identity(name)
     if data is None or not data.get("did_document"):
@@ -193,11 +193,11 @@ def extract_auth_files(name: str = "default") -> tuple[Path, Path] | None:
 
     cred_dir = _ensure_credentials_dir()
 
-    # 写入 DID 文档 JSON
+    # Write DID document JSON
     did_doc_path = cred_dir / f"{name}_did_document.json"
     did_doc_path.write_text(json.dumps(data["did_document"], indent=2, ensure_ascii=False))
 
-    # 写入私钥 PEM
+    # Write private key PEM
     key_path = cred_dir / f"{name}_private_key.pem"
     private_key_pem = data["private_key_pem"]
     if isinstance(private_key_pem, str):
@@ -212,14 +212,14 @@ def create_authenticator(
     name: str = "default",
     config: Any = None,
 ) -> tuple[Any, dict[str, Any]] | None:
-    """创建 DIDWbaAuthHeader 实例。
+    """Create a DIDWbaAuthHeader instance.
 
     Args:
-        name: 凭证名称
-        config: SDKConfig 实例（用于预填充 token 缓存）
+        name: Credential name
+        config: SDKConfig instance (used to pre-populate token cache)
 
     Returns:
-        (authenticator, identity_data) 元组，不可用时返回 None
+        (authenticator, identity_data) tuple, or None if unavailable
     """
     from anp.authentication import DIDWbaAuthHeader
 
@@ -234,11 +234,11 @@ def create_authenticator(
     did_doc_path, key_path = auth_files
     auth = DIDWbaAuthHeader(str(did_doc_path), str(key_path))
 
-    # 若有已保存的 JWT，预填充到 token 缓存（避免首次请求重新 DIDWba 认证）
+    # If a saved JWT exists, pre-populate it into token cache (avoid re-authenticating via DIDWba on first request)
     if data.get("jwt_token") and config is not None:
         server_url = config.user_service_url
         auth.update_token(server_url, {"Authorization": f"Bearer {data['jwt_token']}"})
-        # molt-message 也预填充
+        # Pre-populate molt-message as well
         if hasattr(config, "molt_message_url"):
             auth.update_token(
                 config.molt_message_url,

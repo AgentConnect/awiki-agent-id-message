@@ -1,13 +1,14 @@
-"""注册 + WBA 认证 + JWT 获取。
+"""Registration + WBA authentication + JWT acquisition.
 
-[INPUT]: httpx.AsyncClient, DIDIdentity, ANP auth 函数, rpc_call(), services
+[INPUT]: httpx.AsyncClient, DIDIdentity, ANP auth functions, rpc_call(), services
 [OUTPUT]: register_did(), get_jwt_via_wba(), generate_wba_auth_header(), create_authenticated_identity()
-[POS]: 封装完整的 DID 认证流程，全部基于 ANP，通过 JSON-RPC 2.0 与 user-service 通信
-      RPC 路径使用 /user-service 前缀（兼容 nginx 反向代理和 localhost 直连）
+[POS]: Wraps the complete DID authentication flow, all based on ANP, communicating with
+       user-service via JSON-RPC 2.0.
+       RPC paths use /user-service prefix (compatible with nginx reverse proxy and localhost direct connection)
 
 [PROTOCOL]:
-1. 逻辑变更时同步更新此头部
-2. 更新后检查所在文件夹的 CLAUDE.md
+1. Update this header when logic changes
+2. Check the folder's CLAUDE.md after updates
 """
 
 from __future__ import annotations
@@ -28,10 +29,10 @@ from utils.rpc import rpc_call
 def _secp256k1_sign_callback(
     private_key: ec.EllipticCurvePrivateKey,
 ) -> callable:
-    """创建 secp256k1 签名回调（适配 ANP generate_auth_header 接口）。
+    """Create a secp256k1 signing callback (adapts to ANP generate_auth_header interface).
 
-    ANP generate_auth_header 要求 sign_callback(content: bytes, vm_fragment: str) -> bytes，
-    返回 DER 格式签名。
+    ANP generate_auth_header requires sign_callback(content: bytes, vm_fragment: str) -> bytes,
+    returning DER-encoded signature.
     """
 
     def _callback(content: bytes, verification_method_fragment: str) -> bytes:
@@ -44,14 +45,14 @@ def generate_wba_auth_header(
     identity: DIDIdentity,
     service_domain: str,
 ) -> str:
-    """生成 DID WBA Authorization 头。
+    """Generate DID WBA Authorization header.
 
     Args:
-        identity: DID 身份
-        service_domain: 目标服务域名
+        identity: DID identity.
+        service_domain: Target service domain.
 
     Returns:
-        Authorization 头的值（DIDWba 格式）
+        Authorization header value (DIDWba format).
     """
     private_key = identity.get_private_key()
     return generate_auth_header(
@@ -71,27 +72,27 @@ async def register_did(
     endpoint_url: str | None = None,
     description: str | None = None,
 ) -> dict[str, Any]:
-    """注册 DID 身份。
+    """Register a DID identity.
 
-    直接发送 identity.did_document（已含 ANP 生成的 authentication proof），
-    通过 JSON-RPC 调用 user-service 的 did-auth.register 方法。
+    Sends identity.did_document directly (already contains ANP-generated authentication proof),
+    calling user-service's did-auth.register method via JSON-RPC.
 
     Args:
-        client: 指向 user-service 的 HTTP 客户端
-        identity: DID 身份（did_document 已含 authentication proof）
-        name: 显示名称
-        is_public: 是否公开
-        is_agent: 是否为 AI Agent
-        role: 角色
-        endpoint_url: 连接端点
-        description: 描述
+        client: HTTP client pointing to user-service.
+        identity: DID identity (did_document already contains authentication proof).
+        name: Display name.
+        is_public: Whether publicly visible.
+        is_agent: Whether this is an AI Agent.
+        role: Role.
+        endpoint_url: Connection endpoint.
+        description: Description.
 
     Returns:
-        注册响应 dict（含 did, user_id, message）
+        Registration response dict (contains did, user_id, message).
 
     Raises:
-        JsonRpcError: 注册失败时抛出
-        httpx.HTTPStatusError: HTTP 层错误时抛出
+        JsonRpcError: When registration fails.
+        httpx.HTTPStatusError: On HTTP layer errors.
     """
     payload: dict[str, Any] = {"did_document": identity.did_document}
     if name is not None:
@@ -115,15 +116,15 @@ async def get_jwt_via_wba(
     identity: DIDIdentity,
     domain: str,
 ) -> str:
-    """通过 DID WBA 签名获取 JWT token。
+    """Obtain JWT token via DID WBA signature.
 
     Args:
-        client: 指向 user-service 的 HTTP 客户端
-        identity: DID 身份
-        domain: 服务域名
+        client: HTTP client pointing to user-service.
+        identity: DID identity.
+        domain: Service domain.
 
     Returns:
-        JWT access token 字符串
+        JWT access token string.
     """
     auth_header = generate_wba_auth_header(identity, domain)
     result = await rpc_call(
@@ -145,26 +146,27 @@ async def create_authenticated_identity(
     endpoint_url: str | None = None,
     services: list[dict[str, Any]] | None = None,
 ) -> DIDIdentity:
-    """一站式创建完整 DID 身份（生成密钥 → 注册 → 获取 JWT）。
+    """One-stop creation of a complete DID identity (generate keys -> register -> obtain JWT).
 
-    使用 key-bound DID：公钥 fingerprint 自动成为 DID 路径末段（k1_{fp}），
-    无需手动指定 unique_id。path_prefix 固定为 ["user"]（服务端要求）。
+    Uses key-bound DID: public key fingerprint automatically becomes the last segment
+    of the DID path (k1_{fp}), no manual unique_id needed. path_prefix is fixed to
+    ["user"] (required by the server).
 
     Args:
-        client: 指向 user-service 的 HTTP 客户端
-        config: SDK 配置
-        name: 显示名称
-        is_public: 是否公开
-        is_agent: 是否为 AI Agent
-        role: 角色
-        endpoint_url: 连接端点
-        services: 自定义 service 条目列表，写入 DID 文档并被 proof 签名覆盖
+        client: HTTP client pointing to user-service.
+        config: SDK configuration.
+        name: Display name.
+        is_public: Whether publicly visible.
+        is_agent: Whether this is an AI Agent.
+        role: Role.
+        endpoint_url: Connection endpoint.
+        services: Custom service entry list, written into DID document and covered by proof signing.
 
     Returns:
-        填充了 user_id 和 jwt_token 的 DIDIdentity
+        DIDIdentity with user_id and jwt_token populated.
     """
-    # 1. 创建 key-bound DID 身份（含 authentication proof，绑定到服务域名）
-    #    path_prefix 固定 ["user"]：服务端要求 DID 格式为 did:wba:{domain}:user:{id}
+    # 1. Create key-bound DID identity (with authentication proof, bound to service domain)
+    #    path_prefix fixed to ["user"]: server requires DID format did:wba:{domain}:user:{id}
     identity = create_identity(
         hostname=config.did_domain,
         path_prefix=["user"],
@@ -173,7 +175,7 @@ async def create_authenticated_identity(
         services=services,
     )
 
-    # 2. 注册（直接发送 ANP 生成的文档）
+    # 2. Register (send ANP-generated document directly)
     reg_result = await register_did(
         client,
         identity,
@@ -185,7 +187,7 @@ async def create_authenticated_identity(
     )
     identity.user_id = reg_result["user_id"]
 
-    # 3. 获取 JWT
+    # 3. Obtain JWT
     identity.jwt_token = await get_jwt_via_wba(client, identity, config.did_domain)
 
     return identity
