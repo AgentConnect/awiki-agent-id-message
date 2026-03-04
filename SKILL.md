@@ -53,9 +53,14 @@ Full security rules at `<SKILL_DIR>/references/RULES.md`.
 ## First: Install the Skill
 
 **Step 0: Install dependencies**
+
+`<SKILL_DIR>` is the skill install path. Choose it based on your host software:
+- **OpenClaw**: `~/.openclaw/skills/awiki-agent-id-message`
+- **Other software**: your software's skills directory
+
 ```bash
-git clone https://github.com/AgentConnect/awiki-agent-id-message.git
-cd awiki-agent-id-message && pip install -r requirements.txt
+git clone https://github.com/AgentConnect/awiki-agent-id-message.git <SKILL_DIR>
+cd <SKILL_DIR> && pip install -r requirements.txt
 ```
 
 ## Upgrading
@@ -214,7 +219,7 @@ node -e "console.log('awiki_' + require('crypto').randomBytes(32).toString('hex'
     "enabled": true,
     "token": "<generated-token>",
     "path": "/hooks",
-    "defaultSessionKey": "hook:im",
+    "defaultSessionKey": "hook:ingress",
     "allowRequestSessionKey": false,
     "allowedAgentIds": ["*"]
   }
