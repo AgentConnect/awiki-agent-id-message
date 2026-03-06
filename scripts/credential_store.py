@@ -1,6 +1,6 @@
 """Credential persistence: save/load private keys, DID, JWT to local files.
 
-[INPUT]: DIDIdentity object, DIDWbaAuthHeader (ANP SDK)
+[INPUT]: DIDIdentity object, DIDWbaAuthHeader (ANP SDK), SDKConfig (credentials_dir)
 [OUTPUT]: save_identity(), load_identity(), list_identities(), delete_identity(),
          extract_auth_files(), create_authenticator()
 [POS]: Core credential management module supporting cross-session identity reuse and DIDWbaAuthHeader factory
@@ -19,21 +19,34 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# Credential storage directory (relative to SKILL_DIR)
-_CREDENTIALS_DIR = Path(__file__).resolve().parent.parent / ".credentials"
+from utils.config import SDKConfig
+
+# Legacy credential directory (for fallback reads only)
+_LEGACY_CREDENTIALS_DIR = Path(__file__).resolve().parent.parent / ".credentials"
+
+
+def _get_credentials_dir() -> Path:
+    """Get the credentials directory from SDKConfig."""
+    return SDKConfig().credentials_dir
 
 
 def _ensure_credentials_dir() -> Path:
     """Ensure credentials directory exists with proper permissions."""
-    _CREDENTIALS_DIR.mkdir(parents=True, exist_ok=True)
+    cred_dir = _get_credentials_dir()
+    cred_dir.mkdir(parents=True, exist_ok=True)
     # Set directory permissions to 700 (only current user can access)
-    os.chmod(_CREDENTIALS_DIR, stat.S_IRWXU)
-    return _CREDENTIALS_DIR
+    os.chmod(cred_dir, stat.S_IRWXU)
+    return cred_dir
 
 
 def _credential_path(name: str) -> Path:
-    """Get credential file path."""
+    """Get credential file path (new location)."""
     return _ensure_credentials_dir() / f"{name}.json"
+
+
+def _legacy_credential_path(name: str) -> Path:
+    """Get legacy credential file path for fallback reads."""
+    return _LEGACY_CREDENTIALS_DIR / f"{name}.json"
 
 
 def save_identity(
@@ -104,6 +117,8 @@ def save_identity(
 def load_identity(name: str = "default") -> dict[str, Any] | None:
     """Load a DID identity from a local file.
 
+    Falls back to legacy path (<SKILL_DIR>/.credentials/) if the new path does not exist.
+
     Args:
         name: Credential name (default "default")
 
@@ -111,23 +126,34 @@ def load_identity(name: str = "default") -> dict[str, Any] | None:
         Credential data dict, or None if not found
     """
     path = _credential_path(name)
-    if not path.exists():
-        return None
-    data = json.loads(path.read_text())
-    return data
+    if path.exists():
+        return json.loads(path.read_text())
+
+    # Fallback: read from legacy path (no copy, no migration)
+    legacy_path = _legacy_credential_path(name)
+    if legacy_path.exists():
+        return json.loads(legacy_path.read_text())
+
+    return None
 
 
 def list_identities() -> list[dict[str, Any]]:
     """List all saved identities.
 
+    Merges identities from both new and legacy directories.
+
     Returns:
         List of identities, each containing name, did, created_at, etc.
     """
+    seen_names: set[str] = set()
+    identities: list[dict[str, Any]] = []
+
+    # Scan new location first
     cred_dir = _ensure_credentials_dir()
-    identities = []
     for path in sorted(cred_dir.glob("*.json")):
         try:
             data = json.loads(path.read_text())
+            seen_names.add(path.stem)
             identities.append({
                 "credential_name": path.stem,
                 "did": data.get("did", ""),
@@ -139,6 +165,26 @@ def list_identities() -> list[dict[str, Any]]:
             })
         except (json.JSONDecodeError, OSError):
             continue
+
+    # Scan legacy location for anything not already found
+    if _LEGACY_CREDENTIALS_DIR.exists():
+        for path in sorted(_LEGACY_CREDENTIALS_DIR.glob("*.json")):
+            if path.stem in seen_names:
+                continue
+            try:
+                data = json.loads(path.read_text())
+                identities.append({
+                    "credential_name": path.stem,
+                    "did": data.get("did", ""),
+                    "unique_id": data.get("unique_id", ""),
+                    "name": data.get("name", ""),
+                    "user_id": data.get("user_id", ""),
+                    "created_at": data.get("created_at", ""),
+                    "has_jwt": bool(data.get("jwt_token")),
+                })
+            except (json.JSONDecodeError, OSError):
+                continue
+
     return identities
 
 
@@ -173,6 +219,7 @@ def update_jwt(name: str, jwt_token: str) -> bool:
         return False
     data["jwt_token"] = jwt_token
     path = _credential_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
     os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
     return True

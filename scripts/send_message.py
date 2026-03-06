@@ -64,7 +64,7 @@ async def send_message(
 
         # Store sent message locally
         try:
-            conn = local_store.get_connection(credential_name)
+            conn = local_store.get_connection()
             local_store.ensure_schema(conn)
             local_store.store_message(
                 conn,
@@ -79,10 +79,13 @@ async def send_message(
                 content=content,
                 server_seq=result.get("server_seq"),
                 sent_at=result.get("sent_at"),
+                credential_name=credential_name,
             )
-            # If input was a handle, store it in contacts
+            # Record receiver in contacts
+            contact_fields = {}
             if receiver != receiver_did:
-                local_store.upsert_contact(conn, did=receiver_did, handle=receiver)
+                contact_fields["handle"] = receiver
+            local_store.upsert_contact(conn, did=receiver_did, **contact_fields)
             conn.close()
         except Exception:
             pass  # Non-critical: don't fail the send on local storage errors

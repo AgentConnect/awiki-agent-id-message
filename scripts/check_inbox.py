@@ -134,7 +134,7 @@ def _store_inbox_messages(
         messages = inbox if isinstance(inbox, list) else inbox.get("messages", [])
         if not messages:
             return
-        conn = local_store.get_connection(credential_name)
+        conn = local_store.get_connection()
         local_store.ensure_schema(conn)
         batch = []
         for msg in messages:
@@ -155,7 +155,16 @@ def _store_inbox_messages(
                 "sent_at": msg.get("sent_at") or msg.get("created_at"),
                 "sender_name": msg.get("sender_name"),
             })
-        local_store.store_messages_batch(conn, batch)
+        local_store.store_messages_batch(conn, batch, credential_name=credential_name)
+        # Record senders in contacts
+        seen_dids: set[str] = set()
+        for msg in messages:
+            s = msg.get("sender_did", "")
+            if s and s not in seen_dids:
+                seen_dids.add(s)
+                local_store.upsert_contact(
+                    conn, did=s, name=msg.get("sender_name"),
+                )
         conn.close()
     except Exception:
         logger.debug("Failed to store inbox messages locally", exc_info=True)
@@ -169,7 +178,7 @@ def _store_history_messages(
         messages = history if isinstance(history, list) else history.get("messages", [])
         if not messages:
             return
-        conn = local_store.get_connection(credential_name)
+        conn = local_store.get_connection()
         local_store.ensure_schema(conn)
         batch = []
         for msg in messages:
@@ -191,7 +200,16 @@ def _store_history_messages(
                 "sent_at": msg.get("sent_at") or msg.get("created_at"),
                 "sender_name": msg.get("sender_name"),
             })
-        local_store.store_messages_batch(conn, batch)
+        local_store.store_messages_batch(conn, batch, credential_name=credential_name)
+        # Record senders in contacts
+        seen_dids: set[str] = set()
+        for msg in messages:
+            s = msg.get("sender_did", "")
+            if s and s not in seen_dids:
+                seen_dids.add(s)
+                local_store.upsert_contact(
+                    conn, did=s, name=msg.get("sender_name"),
+                )
         conn.close()
     except Exception:
         logger.debug("Failed to store history messages locally", exc_info=True)

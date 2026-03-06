@@ -1,6 +1,6 @@
 """WebSocket listener config: webhook endpoints + routing rules + routing modes + E2EE transparent handling.
 
-[INPUT]: Environment variables, JSON config file
+[INPUT]: Environment variables, JSON config file, settings.json (unified config)
 [OUTPUT]: ListenerConfig, RoutingRules, ROUTING_MODES
 [POS]: Configuration module for ws_listener.py, defines routing rules, webhook targets, and E2EE handling parameters
 
@@ -15,6 +15,8 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from utils.config import SDKConfig
 
 # Routing mode constants
 ROUTING_MODES = ("agent-all", "smart", "wake-all")
@@ -95,12 +97,16 @@ class ListenerConfig:
         config_path: str | None = None,
         mode_override: str | None = None,
     ) -> ListenerConfig:
-        """Load configuration from JSON file + environment variables.
+        """Load configuration from JSON file + settings.json + environment variables.
 
-        Priority: CLI --mode > environment variables > JSON file > defaults.
+        Priority: CLI --mode > environment variables > config file > settings.json > defaults.
+
+        When config_path is None, automatically reads <DATA_DIR>/settings.json
+        and extracts the "listener" sub-object. Supports both unified format
+        (with "listener" key) and legacy flat format.
 
         Args:
-            config_path: JSON config file path. Uses only defaults and env vars when None.
+            config_path: JSON config file path. Falls back to settings.json when None.
             mode_override: Mode override value passed from CLI.
 
         Returns:
@@ -108,11 +114,21 @@ class ListenerConfig:
         """
         data: dict = {}
 
-        # 1. Read from JSON file
+        # 1. Read from config file or settings.json
         if config_path:
             path = Path(config_path)
             if path.exists():
                 data = json.loads(path.read_text(encoding="utf-8"))
+                # Support unified format: extract "listener" sub-object
+                if "listener" in data:
+                    data = data["listener"]
+        else:
+            # Auto-read from <DATA_DIR>/config/settings.json
+            settings_path = SDKConfig().data_dir / "config" / "settings.json"
+            if settings_path.exists():
+                settings = json.loads(settings_path.read_text(encoding="utf-8"))
+                if "listener" in settings:
+                    data = settings["listener"]
 
         # 2. Environment variable overrides
         env_agent = os.environ.get("LISTENER_AGENT_WEBHOOK_URL")

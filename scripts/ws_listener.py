@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """WebSocket listener: long-running background process that receives molt-message pushes and routes to webhooks.
 
-[INPUT]: credential_store (DID identity), SDKConfig, WsClient, ListenerConfig, E2eeHandler, service_manager
-[OUTPUT]: WebSocket -> HTTP webhook bridge (agent/wake dual endpoints) + cross-platform service lifecycle management
+[INPUT]: credential_store (DID identity), SDKConfig, WsClient, ListenerConfig, E2eeHandler, service_manager, local_store
+[OUTPUT]: WebSocket -> HTTP webhook bridge (agent/wake dual endpoints) + cross-platform service lifecycle management + local SQLite persistence
 [POS]: Standalone background process with cross-platform service management (launchd / systemd / Task Scheduler), reuses utils/ core tool layer
 
 [PROTOCOL]:
@@ -45,6 +45,8 @@ from listener_config import ROUTING_MODES, ListenerConfig
 from utils.config import SDKConfig
 from utils.identity import DIDIdentity
 from utils.ws import WsClient
+
+import local_store
 
 logger = logging.getLogger("ws_listener")
 
@@ -285,6 +287,10 @@ async def listen_loop(
         decrypt_fail_action=cfg.e2ee_decrypt_fail_action,
     )
 
+    # Local SQLite storage initialization
+    local_db = local_store.get_connection()
+    local_store.ensure_schema(local_db)
+
     async with httpx.AsyncClient(timeout=10.0, trust_env=False) as http:
         while True:
             cred_data = load_identity(credential_name)
@@ -379,6 +385,42 @@ async def listen_loop(
                         # Original routing logic
                         route = classify_message(params, my_did, cfg)
 
+                        # Store message locally before routing
+                        try:
+                            sender_did = params.get("sender_did", "")
+                            await asyncio.to_thread(
+                                local_store.store_message,
+                                local_db,
+                                msg_id=params.get("id", ""),
+                                thread_id=local_store.make_thread_id(
+                                    my_did,
+                                    peer_did=sender_did,
+                                    group_id=params.get("group_id"),
+                                ),
+                                direction=0,
+                                sender_did=sender_did,
+                                receiver_did=params.get("receiver_did"),
+                                group_id=params.get("group_id"),
+                                group_did=params.get("group_did"),
+                                content_type=params.get("type", "text"),
+                                content=str(params.get("content", "")),
+                                server_seq=params.get("server_seq"),
+                                sent_at=params.get("sent_at"),
+                                is_e2ee=bool(params.get("_e2ee")),
+                                sender_name=params.get("sender_name"),
+                                credential_name=credential_name,
+                            )
+                            # Record sender in contacts
+                            if sender_did:
+                                await asyncio.to_thread(
+                                    local_store.upsert_contact,
+                                    local_db,
+                                    did=sender_did,
+                                    name=params.get("sender_name"),
+                                )
+                        except Exception:
+                            logger.debug("Failed to store message locally", exc_info=True)
+
                         if route is None:
                             logger.debug(
                                 "Dropping message: sender=%s type=%s",
@@ -393,6 +435,7 @@ async def listen_loop(
             except asyncio.CancelledError:
                 if e2ee_handler is not None:
                     await e2ee_handler.force_save_state()
+                local_db.close()
                 logger.info("Listen loop cancelled")
                 raise
             except Exception as exc:

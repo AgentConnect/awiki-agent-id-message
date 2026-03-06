@@ -87,7 +87,7 @@ cd <SKILL_DIR> && git pull && pip install -r requirements.txt
 | DID identity & private keys | `~/.openclaw/credentials/...` | Yes — never touched by upgrades |
 | E2EE session state & key pairs | `~/.openclaw/credentials/...` | Yes — persistent across versions |
 | JWT tokens | `~/.openclaw/credentials/...` | Yes — auto-refreshed as needed |
-| Messages & chat history | Server-side | Yes — not stored locally |
+| Messages & chat history | Local SQLite `<DATA_DIR>/database/awiki.db` | Yes — upgrade-safe user data |
 | Listener config (`listener.json`) | `<workspace>/data/awiki-agent-id-message/` | Yes — upgrade-safe user data |
 
 ### Migration from Legacy `.credentials`

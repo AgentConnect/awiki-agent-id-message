@@ -94,7 +94,7 @@ Three-layer architecture: CLI script layer -> Persistence layer -> Core utility 
 
 ### scripts/utils/ — Core Utility Layer (pure async)
 
-- **config.py**: `SDKConfig` dataclass, reads service addresses from environment variables. `data_dir` field resolves `AWIKI_DATA_DIR` env var with `<SKILL_DIR>/.data/` fallback. `load()` class method reads `<DATA_DIR>/settings.json` with env var overrides
+- **config.py**: `SDKConfig` dataclass, reads service addresses from environment variables. `credentials_dir` field resolves to `~/.openclaw/credentials/awiki-agent-id-message/`. `data_dir` field resolves via priority: `AWIKI_DATA_DIR` env (direct override) > `AWIKI_WORKSPACE/data/<skill>` > `~/.openclaw/workspace/data/<skill>`. `load()` class method reads `<DATA_DIR>/config/settings.json` with env var overrides
 - **identity.py**: `DIDIdentity` data class + `create_identity()` wrapping ANP's `create_did_wba_document_with_key_binding()`. Generates secp256k1 key pair + E2EE key pairs (key-2 secp256r1 for signing + key-3 X25519 for key agreement). Public key fingerprint auto-constructs key-bound DID path (k1_{fp}) + DID document + WBA proof
 - **auth.py**: Complete authentication pipeline — `create_authenticated_identity()` chains: create identity -> `register_did()` register -> `get_jwt_via_wba()` obtain JWT
 - **client.py**: httpx AsyncClient factory (`create_user_service_client`, `create_molt_message_client`), 30s timeout, `trust_env=False`
@@ -107,11 +107,11 @@ Three-layer architecture: CLI script layer -> Persistence layer -> Core utility 
 
 ### scripts/ — CLI Script Layer
 
-- **credential_store.py** / **e2ee_store.py**: Credential and E2EE state persistence to `.credentials/` directory (JSON format, 600 permissions)
-- **local_store.py**: SQLite local storage — contacts + messages two tables, threads/inbox/outbox views. WAL mode for concurrent read/write. Sync API (sqlite3 stdlib), ws_listener wraps via `asyncio.to_thread()`. Schema versioned via `PRAGMA user_version`
+- **credential_store.py** / **e2ee_store.py**: Credential and E2EE state persistence to `~/.openclaw/credentials/awiki-agent-id-message/` directory (JSON format, 600 permissions). Falls back to legacy `<SKILL_DIR>/.credentials/` for reads if new path not found
+- **local_store.py**: SQLite local storage — contacts + messages two tables, threads/inbox/outbox views. Single shared database at `<DATA_DIR>/database/awiki.db`. Messages have `credential_name` column to distinguish multi-identity. WAL mode for concurrent read/write. Sync API (sqlite3 stdlib), ws_listener wraps via `asyncio.to_thread()`. Schema versioned via `PRAGMA user_version` (current: v2)
 - **query_db.py**: Read-only SQL query CLI — accepts a SELECT statement, executes against local SQLite, returns JSON. Rejects write operations and multi-statement queries
 - **check_status.py**: Unified status check entry point — chains identity verification, inbox classification summary, E2EE auto-handshake processing. Outputs structured JSON. Called by Agent session startup protocol and heartbeat
-- **listener_config.py**: `ListenerConfig` + `RoutingRules` — WebSocket listener configuration module. Defines dual webhook endpoints, routing modes (agent-all/smart/wake-all), message routing rules and E2EE transparent processing parameters. Supports unified settings.json (`listener` sub-object) + legacy JSON file + environment variables + CLI four-level override
+- **listener_config.py**: `ListenerConfig` + `RoutingRules` — WebSocket listener configuration module. Defines dual webhook endpoints, routing modes (agent-all/smart/wake-all), message routing rules and E2EE transparent processing parameters. Supports unified settings.json (`listener` sub-object, at `<DATA_DIR>/config/settings.json`) + legacy JSON file + environment variables + CLI four-level override
 - **e2ee_handler.py**: `E2eeHandler` — E2EE transparent handler for WebSocket listener. Intercepts E2EE messages before `classify_message`: protocol messages (init/rekey/error) are handled internally without forwarding, encrypted messages (e2ee_msg) are decrypted and forwarded as plaintext. asyncio.Lock protects concurrency, periodic state saving
 - **ws_listener.py**: WebSocket listener — persistent background process + cross-platform service lifecycle management. Reuses `WsClient` to connect to molt-message WebSocket. E2EE messages handled transparently by `E2eeHandler` (optional). Received messages stored to local SQLite via `local_store`. Others routed via `classify_message()` (agent/wake/discard) and forwarded to corresponding localhost webhook endpoints. Subcommands: `run` (foreground debug), `install` (install background service), `uninstall`, `start`/`stop`/`status` (management). Service management delegated to `service_manager.py`
 - **service_manager.py**: `ServiceManager` base class + `MacOSServiceManager` (launchd) / `LinuxServiceManager` (systemd) / `WindowsServiceManager` (Task Scheduler) + `get_service_manager()` factory. Handles install/uninstall/start/stop/status for each platform
@@ -162,15 +162,16 @@ When modifying code logic, the corresponding file's `[INPUT]/[OUTPUT]/[POS]` hea
 - **ANP >= 0.6.2** is a hard dependency, providing DID, E2EE (HPKE) cryptographic primitives, and WNS Handle validation
 - **Python >= 3.10**
 - All network operations must use async/await (httpx AsyncClient)
-- `.credentials/` directory must remain gitignored, private key files with 600 permissions
-- `.data/` directory must remain gitignored (local SQLite databases and settings)
+- `.credentials/` directory must remain gitignored (legacy fallback), credentials now stored at `~/.openclaw/credentials/awiki-agent-id-message/`
+- `.data/` directory must remain gitignored (legacy fallback), data now stored at `<workspace>/data/awiki-agent-id-message/`
 - API reference documents are in the `references/` directory (did-auth-api.md, profile-api.md, messaging-api.md, relationship-api.md, e2ee-protocol.md, local-store-schema.md)
 
 ## Environment Variables
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `AWIKI_DATA_DIR` | `<SKILL_DIR>/.data/` | DATA_DIR path (SQLite, settings.json) |
+| `AWIKI_DATA_DIR` | (see below) | DATA_DIR path override (direct full path) |
+| `AWIKI_WORKSPACE` | `~/.openclaw/workspace` | Workspace root; DATA_DIR = `<workspace>/data/awiki-agent-id-message` |
 | `E2E_USER_SERVICE_URL` | `https://awiki.ai` | user-service address |
 | `E2E_MOLT_MESSAGE_URL` | `https://awiki.ai` | molt-message address |
 | `E2E_DID_DOMAIN` | `awiki.ai` | DID domain (proof binding) |
