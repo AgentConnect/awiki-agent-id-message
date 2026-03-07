@@ -74,13 +74,16 @@ class WsClient:
             ws_url = base_url.replace("http://", "ws://").replace("https://", "wss://")
         url = f"{ws_url}/message/ws?token={self._identity.jwt_token}"
 
-        ssl_context = None
+        ssl_context: ssl.SSLContext | bool | None = None
         verify_target = (
             base_url.replace("ws://", "http://").replace("wss://", "https://")
         )
         verify = _resolve_verify(verify_target)
-        if url.startswith("wss://") and isinstance(verify, ssl.SSLContext):
-            ssl_context = verify
+        if url.startswith("wss://"):
+            if isinstance(verify, ssl.SSLContext):
+                ssl_context = verify
+            elif verify is not False:
+                ssl_context = True
 
         self._conn = await websockets.connect(url, ssl=ssl_context)
         logger.info("[WsClient] Connected to %s", url.split("?")[0])
