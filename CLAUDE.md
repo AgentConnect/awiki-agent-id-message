@@ -82,9 +82,9 @@ python scripts/e2ee_messaging.py --process --peer "<DID>"
 python scripts/e2ee_messaging.py --send "<DID>" --content "secret"
 
 # Unified status check
-python scripts/check_status.py                              # Basic status check
-python scripts/check_status.py --auto-e2ee                  # With E2EE auto-processing
-python scripts/check_status.py --credential alice            # Specify credential
+python scripts/check_status.py                              # Default-on E2EE auto-processing
+python scripts/check_status.py --no-auto-e2ee               # Disable E2EE auto-processing
+python scripts/check_status.py --credential alice           # Specify credential
 
 # WebSocket listener (background service management)
 python scripts/ws_listener.py install --credential default --mode smart  # Install and start
@@ -121,11 +121,11 @@ Three-layer architecture: CLI script layer -> Persistence layer -> Core utility 
 ### scripts/ — CLI Script Layer
 
 - **credential_store.py** / **e2ee_store.py**: Credential and E2EE state persistence to `~/.openclaw/credentials/awiki-agent-id-message/` directory (JSON format, 600 permissions)
-- **local_store.py**: SQLite local storage — contacts + messages two tables, threads/inbox/outbox views. Single shared database at `<DATA_DIR>/database/awiki.db`. Messages are owned per credential via composite key `(msg_id, credential_name)` so the same server message can exist for multiple local identities. WAL mode for concurrent read/write. Sync API (sqlite3 stdlib), ws_listener wraps via `asyncio.to_thread()`. Schema versioned via `PRAGMA user_version` (current: v3)
+- **local_store.py**: SQLite local storage — contacts + messages + `e2ee_outbox` three tables, threads/inbox/outbox views. Single shared database at `<DATA_DIR>/database/awiki.db`. Messages are owned per credential via composite key `(msg_id, credential_name)` so the same server message can exist for multiple local identities. `e2ee_outbox` tracks encrypted send attempts, peer-side failures, and resend/drop decisions. WAL mode for concurrent read/write. Sync API (sqlite3 stdlib), ws_listener wraps via `asyncio.to_thread()`. Schema versioned via `PRAGMA user_version` (current: v4)
 - **query_db.py**: Read-only SQL query CLI — accepts a SELECT statement, executes against local SQLite, returns JSON. Rejects write operations and multi-statement queries
-- **check_status.py**: Unified status check entry point — chains identity verification, inbox classification summary, E2EE auto-handshake processing. Outputs structured JSON. Called by Agent session startup protocol and heartbeat
+- **check_status.py**: Unified status check entry point — chains identity verification, inbox classification summary, and server_seq-aware E2EE auto-processing. Outputs structured JSON. Called by Agent session startup protocol and heartbeat
 - **listener_config.py**: `ListenerConfig` + `RoutingRules` — WebSocket listener configuration module. Defines dual webhook endpoints, routing modes (agent-all/smart/wake-all), message routing rules and E2EE transparent processing parameters. Supports unified settings.json (`listener` sub-object, at `<DATA_DIR>/config/settings.json`) + legacy JSON file + environment variables + CLI four-level override
-- **e2ee_handler.py**: `E2eeHandler` — E2EE transparent handler for WebSocket listener. Intercepts E2EE messages before `classify_message`: protocol messages (init/rekey/error) are handled internally without forwarding, encrypted messages (e2ee_msg) are decrypted and forwarded as plaintext. asyncio.Lock protects concurrency, periodic state saving
+- **e2ee_handler.py**: `E2eeHandler` — E2EE transparent handler for WebSocket listener. Intercepts E2EE messages before `classify_message`: protocol messages (init/rekey/error) are handled internally without forwarding, encrypted messages (e2ee_msg) are decrypted and forwarded as plaintext. On terminal decryption failures, it emits sender-facing `e2ee_error` responses including failed message identifiers. asyncio.Lock protects concurrency, periodic state saving
 - **ws_listener.py**: WebSocket listener — persistent background process + cross-platform service lifecycle management. Reuses `WsClient` to connect to molt-message WebSocket. E2EE messages handled transparently by `E2eeHandler` (optional). Received messages stored to local SQLite via `local_store`. Others routed via `classify_message()` (agent/wake/discard) and forwarded to corresponding localhost webhook endpoints. Subcommands: `run` (foreground debug), `install` (install background service), `uninstall`, `start`/`stop`/`status` (management). Service management delegated to `service_manager.py`
 - **service_manager.py**: `ServiceManager` base class + `MacOSServiceManager` (launchd) / `LinuxServiceManager` (systemd) / `WindowsServiceManager` (Task Scheduler) + `get_service_manager()` factory. Handles install/uninstall/start/stop/status for each platform
 - Other scripts are CLI entry points for each feature, wrapping async calls via `asyncio.run()`
@@ -166,7 +166,13 @@ When modifying code logic, the corresponding file's `[INPUT]/[OUTPUT]/[POS]` hea
 
 **E2EE State Persistence**: `E2eeClient.export_state()` serializes ACTIVE session state (with version="hpke_v1" marker), `from_state()` restores it. Legacy formats are automatically discarded. ACTIVE sessions expire after 24 hours. One-step initialization means no PENDING concept.
 
-**E2EE Inbox Processing Order**: Dual sorting by `created_at` timestamp + protocol type (init < rekey < e2ee_msg < error) ensures initialization is processed before encrypted messages.
+**E2EE Inbox Processing Order**: Inbox processing prioritizes `server_seq` inside the same sender stream, falls back to `created_at`, then applies protocol type ordering (init < rekey < e2ee_msg < error). This keeps store-and-forward processing stable without assuming a global cross-server sequence.
+
+**E2EE Version Gate**: All private E2EE content must include `e2ee_version="1.1"`. Legacy payloads without this field are treated as unsupported and trigger `e2ee_error(error_code="unsupported_version")` with `required_e2ee_version="1.1"`.
+
+**E2EE ACK + Outbox**: Successful `e2ee_init` / `e2ee_rekey` handling emits `e2ee_ack`, and the sender records peer confirmation per `session_id`. Outgoing encrypted messages are recorded in `e2ee_outbox`; peer-side `e2ee_error` messages update those records so a user can later choose retry or drop.
+
+**E2EE Failure Feedback**: Terminal decrypt failures, unsupported-version failures, and proof-expired/proof-from-future protocol failures are translated into `e2ee_error` responses. These responses should include `failed_msg_id` when the failing encrypted message is known, may include `failed_server_seq`, and expose a machine-readable `retry_hint`.
 
 **RPC Endpoint Paths**: Authentication via `/user-service/did-auth/rpc`, messaging via `/message/rpc`, Profile via `/user-service/profile/rpc`, groups/relationships via `/user-service/did/relationships/rpc`. The `/user-service` prefix supports nginx reverse proxy.
 

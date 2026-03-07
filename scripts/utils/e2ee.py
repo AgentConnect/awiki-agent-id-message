@@ -4,10 +4,11 @@
          signing_pem (secp256r1 key-2), x25519_pem (key-3)
 [OUTPUT]: E2eeClient class providing high-level API for one-step initialization,
           encryption, decryption, proof-field-compatible protocol processing,
-          and state export/restore
+          state export/restore, and canonical e2ee_error message text generation
 [POS]: Wraps ANP's underlying HPKE E2EE protocol (RFC 9180 + Chain Ratchet) to provide
        a simple encrypt/decrypt interface for upper-layer applications;
-       supports cross-process state persistence
+       supports cross-process state persistence and emits sender-facing e2ee_error
+       responses for terminal protocol failures
 
 [PROTOCOL]:
 1. Update this header when logic changes
@@ -35,6 +36,8 @@ from anp.e2e_encryption_hpke import (
     SessionState,
     HpkeKeyManager,
     MessageType,
+    generate_proof,
+    validate_proof,
     detect_message_type,
     extract_x25519_public_key_from_did_document,
     extract_signing_public_key_from_did_document,
@@ -45,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 # State version marker, used to distinguish from old formats
 _STATE_VERSION = "hpke_v1"
+SUPPORTED_E2EE_VERSION = "1.1"
 
 
 def _extract_proof_verification_method(proof: Any) -> str:
@@ -68,6 +72,104 @@ def _extract_proof_verification_method(proof: Any) -> str:
         or proof.get("verificationMethod")
         or ""
     )
+
+
+def ensure_supported_e2ee_version(content: dict[str, Any]) -> str:
+    """Validate the required E2EE content version for the awiki runtime."""
+    version = str(content.get("e2ee_version", "")).strip()
+    if not version:
+        raise ValueError(
+            f"unsupported_version: missing e2ee_version (required {SUPPORTED_E2EE_VERSION})"
+        )
+    if version != SUPPORTED_E2EE_VERSION:
+        raise ValueError(
+            f"unsupported_version: expected {SUPPORTED_E2EE_VERSION}, got {version}"
+        )
+    return version
+
+
+def build_e2ee_error_content(
+    error_code: str,
+    *,
+    session_id: str | None = None,
+    failed_msg_id: str | None = None,
+    failed_server_seq: int | None = None,
+    retry_hint: str | None = None,
+    required_e2ee_version: str | None = None,
+    message: str | None = None,
+) -> dict[str, Any]:
+    """Build an E2EE error payload without relying on a newer ANP package release."""
+    content: dict[str, Any] = {
+        "e2ee_version": SUPPORTED_E2EE_VERSION,
+        "error_code": error_code,
+    }
+    if session_id is not None:
+        content["session_id"] = session_id
+    if failed_msg_id is not None:
+        content["failed_msg_id"] = failed_msg_id
+    if failed_server_seq is not None:
+        content["failed_server_seq"] = failed_server_seq
+    if retry_hint is not None:
+        content["retry_hint"] = retry_hint
+    if required_e2ee_version is not None:
+        content["required_e2ee_version"] = required_e2ee_version
+    if message is not None:
+        content["message"] = message
+    return content
+
+
+def build_e2ee_error_message(
+    error_code: str,
+    *,
+    required_e2ee_version: str | None = None,
+    detail: str | None = None,
+) -> str:
+    """Build a consistent human-readable e2ee_error message."""
+    version = required_e2ee_version or SUPPORTED_E2EE_VERSION
+    base_messages = {
+        "unsupported_version": (
+            f"Peer E2EE content version is unsupported. "
+            f"Please upgrade to e2ee_version={version}."
+        ),
+        "session_not_found": (
+            "E2EE session was not found on the receiver. "
+            "Please rekey or re-initialize before resending."
+        ),
+        "session_expired": (
+            "E2EE session has expired. Please rekey and resend the message."
+        ),
+        "decryption_failed": (
+            "E2EE decryption failed on the receiver. You may resend the message "
+            "or rekey and resend."
+        ),
+        "invalid_seq": (
+            "E2EE message sequence is invalid. Please rekey before resending."
+        ),
+        "proof_expired": (
+            "The E2EE control message expired before it was processed. "
+            "Please resend it with a fresh timestamp."
+        ),
+        "proof_from_future": (
+            "The E2EE control message timestamp is too far in the future. "
+            "Please sync the sender clock and resend."
+        ),
+    }
+    message = base_messages.get(error_code, "E2EE processing failed.")
+    if detail:
+        return f"{message} Detail: {detail}"
+    return message
+
+
+def _classify_protocol_error(exc: BaseException) -> tuple[str, str] | None:
+    """Map protocol-processing failures to sender-visible error codes when safe."""
+    msg = str(exc).lower()
+    if "unsupported_version" in msg:
+        return ("unsupported_version", "drop")
+    if "proof_expired" in msg:
+        return ("proof_expired", "resend")
+    if "proof_from_future" in msg:
+        return ("proof_from_future", "drop")
+    return None
 
 
 class E2eeClient:
@@ -116,6 +218,7 @@ class E2eeClient:
                 self._x25519_key = key
 
         self._key_manager = HpkeKeyManager()
+        self._confirmed_session_ids: set[str] = set()
 
     async def initiate_handshake(
         self, peer_did: str
@@ -181,10 +284,35 @@ class E2eeClient:
             List of messages to send (in HPKE scheme, usually an empty list
             since init/rekey do not require a reply).
         """
+        if msg_type == "e2ee_ack":
+            return await self._handle_ack(content)
+
         detected = detect_message_type(msg_type)
         if detected is None:
             logger.warning("Unrecognized E2EE message type: %s", msg_type)
             return []
+
+        if detected != MessageType.E2EE_ERROR:
+            try:
+                ensure_supported_e2ee_version(content)
+            except ValueError as exc:
+                logger.warning("Unsupported E2EE version for %s: %s", msg_type, exc)
+                sender_did = content.get("sender_did")
+                if sender_did:
+                    return [(
+                        "e2ee_error",
+                        build_e2ee_error_content(
+                            error_code="unsupported_version",
+                            session_id=content.get("session_id"),
+                            retry_hint="drop",
+                            required_e2ee_version=SUPPORTED_E2EE_VERSION,
+                            message=build_e2ee_error_message(
+                                "unsupported_version",
+                                required_e2ee_version=SUPPORTED_E2EE_VERSION,
+                            ),
+                        ),
+                    )]
+                return []
 
         if detected == MessageType.E2EE_INIT:
             return await self._handle_init(content)
@@ -209,6 +337,12 @@ class E2eeClient:
         if not session_id:
             return False
         return self._key_manager.get_session_by_id(session_id) is not None
+
+    def is_session_confirmed(self, session_id: str | None) -> bool:
+        """Check whether a session has been remotely confirmed via e2ee_ack."""
+        if not session_id:
+            return False
+        return session_id in self._confirmed_session_ids
 
     async def ensure_active_session(
         self, peer_did: str
@@ -274,6 +408,8 @@ class E2eeClient:
         if not session_id:
             raise RuntimeError("Message missing session_id")
 
+        ensure_supported_e2ee_version(content)
+
         session = self._key_manager.get_session_by_id(session_id)
         if session is None:
             raise RuntimeError(f"Cannot find session for session_id={session_id}")
@@ -304,6 +440,7 @@ class E2eeClient:
             "local_did": self.local_did,
             "signing_pem": self._signing_pem,
             "x25519_pem": self._x25519_pem,
+            "confirmed_session_ids": sorted(self._confirmed_session_ids),
             "sessions": sessions,
         }
 
@@ -335,7 +472,27 @@ class E2eeClient:
             session = cls._restore_session(session_data)
             if session is not None:
                 client._key_manager.register_session(session)
+        client._confirmed_session_ids = set(state.get("confirmed_session_ids", []))
         return client
+
+    def _build_ack_content(
+        self,
+        *,
+        session_id: str,
+        recipient_did: str,
+        expires: int = 86400,
+    ) -> dict[str, Any]:
+        """Build a signed e2ee_ack payload for an accepted session."""
+        if self._signing_key is None:
+            raise RuntimeError("Missing E2EE signing key for ack")
+        content = {
+            "e2ee_version": SUPPORTED_E2EE_VERSION,
+            "session_id": session_id,
+            "sender_did": self.local_did,
+            "recipient_did": recipient_did,
+            "expires": expires,
+        }
+        return generate_proof(content, self._signing_key, f"{self.local_did}#key-2")
 
     @staticmethod
     def _export_session(session: E2eeHpkeSession) -> dict[str, Any] | None:
@@ -453,7 +610,24 @@ class E2eeClient:
             session.process_init(content, sender_signing_pk)
         except (ValueError, RuntimeError) as e:
             logger.warning("Failed to process e2ee_init: %s", e)
-            return []
+            classified = _classify_protocol_error(e)
+            if classified is None:
+                return []
+            error_code, retry_hint = classified
+            return [(
+                "e2ee_error",
+                build_e2ee_error_content(
+                    error_code=error_code,
+                    session_id=content.get("session_id"),
+                    retry_hint=retry_hint,
+                    required_e2ee_version=SUPPORTED_E2EE_VERSION if error_code == "unsupported_version" else None,
+                    message=build_e2ee_error_message(
+                        error_code,
+                        required_e2ee_version=SUPPORTED_E2EE_VERSION if error_code == "unsupported_version" else None,
+                        detail=str(e),
+                    ),
+                ),
+            )]
 
         # Register session (immediately ACTIVE)
         self._key_manager.register_session(session)
@@ -462,8 +636,13 @@ class E2eeClient:
             session.local_did, session.peer_did, session.session_id,
         )
 
-        # HPKE scheme: init does not require a reply
-        return []
+        ack_content = self._build_ack_content(
+            session_id=session.session_id or content.get("session_id", ""),
+            recipient_did=sender_did,
+            expires=int(content.get("expires", 86400)),
+        )
+        self._confirmed_session_ids.add(session.session_id or content.get("session_id", ""))
+        return [("e2ee_ack", ack_content)]
 
     async def _handle_rekey(
         self, content: dict[str, Any]
@@ -507,7 +686,13 @@ class E2eeClient:
                 logger.info(
                     "E2EE session rekey successful: %s <-> %s", self.local_did, sender_did
                 )
-                return []
+                ack_content = self._build_ack_content(
+                    session_id=session.session_id or content.get("session_id", ""),
+                    recipient_did=sender_did,
+                    expires=int(content.get("expires", 86400)),
+                )
+                self._confirmed_session_ids.add(session.session_id or content.get("session_id", ""))
+                return [("e2ee_ack", ack_content)]
             except (ValueError, RuntimeError) as e:
                 logger.warning("Rekey of existing session failed, attempting to create new session: %s", e)
 
@@ -524,18 +709,95 @@ class E2eeClient:
             session.process_rekey(content, sender_signing_pk)
         except (ValueError, RuntimeError) as e:
             logger.warning("Failed to process e2ee_rekey: %s", e)
-            return []
+            classified = _classify_protocol_error(e)
+            if classified is None:
+                return []
+            error_code, retry_hint = classified
+            return [(
+                "e2ee_error",
+                build_e2ee_error_content(
+                    error_code=error_code,
+                    session_id=content.get("session_id"),
+                    retry_hint=retry_hint,
+                    required_e2ee_version=SUPPORTED_E2EE_VERSION if error_code == "unsupported_version" else None,
+                    message=build_e2ee_error_message(
+                        error_code,
+                        required_e2ee_version=SUPPORTED_E2EE_VERSION if error_code == "unsupported_version" else None,
+                        detail=str(e),
+                    ),
+                ),
+            )]
 
         self._key_manager.register_session(session)
         logger.info(
             "E2EE session rekey (new): %s <-> %s", self.local_did, sender_did
         )
+        ack_content = self._build_ack_content(
+            session_id=session.session_id or content.get("session_id", ""),
+            recipient_did=sender_did,
+            expires=int(content.get("expires", 86400)),
+        )
+        self._confirmed_session_ids.add(session.session_id or content.get("session_id", ""))
+        return [("e2ee_ack", ack_content)]
+
+    async def _handle_ack(
+        self, content: dict[str, Any]
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """Handle e2ee_ack: verify proof and mark the session as confirmed."""
+        ensure_supported_e2ee_version(content)
+
+        session_id = content.get("session_id", "")
+        sender_did = content.get("sender_did", "")
+        recipient_did = content.get("recipient_did", "")
+        if not session_id or not sender_did:
+            logger.warning("e2ee_ack missing session_id or sender_did")
+            return []
+        if recipient_did and recipient_did != self.local_did:
+            logger.warning("e2ee_ack recipient mismatch: expected=%s got=%s", self.local_did, recipient_did)
+            return []
+
+        sender_doc = await resolve_did_wba_document(sender_did)
+        if sender_doc is None:
+            logger.warning("Unable to retrieve ack sender DID document: %s", sender_did)
+            return []
+
+        proof = content.get("proof", {})
+        vm_id = _extract_proof_verification_method(proof)
+        try:
+            sender_signing_pk = extract_signing_public_key_from_did_document(
+                sender_doc, vm_id
+            )
+            validate_proof(
+                content,
+                sender_signing_pk,
+                max_past_age_seconds=int(content.get("expires", 86400)),
+            )
+        except Exception as exc:
+            logger.warning("Failed to verify e2ee_ack: %s", exc)
+            return []
+
+        session = self._key_manager.get_session_by_id(session_id)
+        if session is None:
+            logger.warning("Received e2ee_ack for unknown session_id=%s", session_id)
+            return []
+        if session.peer_did != sender_did:
+            logger.warning("Received e2ee_ack from unexpected peer: %s", sender_did)
+            return []
+
+        self._confirmed_session_ids.add(session_id)
+        logger.info("E2EE session confirmed by peer: %s", session_id)
         return []
 
     async def _handle_error(
         self, content: dict[str, Any]
     ) -> list[tuple[str, dict[str, Any]]]:
         """Handle E2EE Error: log, remove the corresponding session, and auto re-handshake for recoverable errors."""
+        try:
+            ensure_supported_e2ee_version(content)
+        except ValueError as exc:
+            logger.warning("Ignoring legacy e2ee_error without supported version: %s", exc)
+            return []
+
         error_code = content.get("error_code", "unknown")
         session_id = content.get("session_id", "")
         logger.warning(
@@ -562,4 +824,10 @@ class E2eeClient:
         return []
 
 
-__all__ = ["E2eeClient"]
+__all__ = [
+    "E2eeClient",
+    "SUPPORTED_E2EE_VERSION",
+    "ensure_supported_e2ee_version",
+    "build_e2ee_error_content",
+    "build_e2ee_error_message",
+]

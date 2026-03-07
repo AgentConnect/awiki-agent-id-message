@@ -40,6 +40,7 @@ class TestSchema:
         }
         assert "contacts" in tables
         assert "messages" in tables
+        assert "e2ee_outbox" in tables
 
     def test_views_created(self, db):
         views = {
@@ -54,14 +55,14 @@ class TestSchema:
 
     def test_schema_version(self, db):
         version = db.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 3
+        assert version == 4
 
     def test_ensure_schema_idempotent(self, db):
         """Calling ensure_schema multiple times is safe."""
         local_store.ensure_schema(db)
         local_store.ensure_schema(db)
         version = db.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 3
+        assert version == 4
 
     def test_wal_mode(self, db):
         mode = db.execute("PRAGMA journal_mode").fetchone()[0]
@@ -180,6 +181,22 @@ class TestStoreMessage:
         ).fetchone()
         assert row["credential_name"] == ""
 
+    def test_get_message_by_id(self, db):
+        local_store.store_message(
+            db,
+            msg_id="m_lookup",
+            thread_id="dm:a:b",
+            direction=1,
+            sender_did="did:a",
+            content="lookup",
+            credential_name="alice",
+        )
+        row = local_store.get_message_by_id(
+            db, msg_id="m_lookup", credential_name="alice"
+        )
+        assert row is not None
+        assert row["content"] == "lookup"
+
 
 class TestStoreMessagesBatch:
     """Batch message storage."""
@@ -275,6 +292,104 @@ class TestUpsertContact:
         local_store.upsert_contact(db, did="did:c3", unknown_field="ignored")
         row = db.execute("SELECT * FROM contacts WHERE did='did:c3'").fetchone()
         assert row is not None
+
+
+class TestE2eeOutbox:
+    """E2EE outbox persistence and retry status tracking."""
+
+    def test_queue_and_fetch_outbox_record(self, db):
+        outbox_id = local_store.queue_e2ee_outbox(
+            db,
+            peer_did="did:b",
+            plaintext="secret",
+            session_id="sess-1",
+            credential_name="alice",
+        )
+
+        record = local_store.get_e2ee_outbox(
+            db, outbox_id=outbox_id, credential_name="alice"
+        )
+        assert record is not None
+        assert record["peer_did"] == "did:b"
+        assert record["local_status"] == "queued"
+        assert record["attempt_count"] == 0
+
+    def test_mark_outbox_sent(self, db):
+        outbox_id = local_store.queue_e2ee_outbox(
+            db,
+            peer_did="did:b",
+            plaintext="hello",
+            credential_name="alice",
+        )
+        local_store.mark_e2ee_outbox_sent(
+            db,
+            outbox_id=outbox_id,
+            credential_name="alice",
+            session_id="sess-2",
+            sent_msg_id="msg-1",
+            sent_server_seq=8,
+        )
+
+        record = local_store.get_e2ee_outbox(
+            db, outbox_id=outbox_id, credential_name="alice"
+        )
+        assert record["local_status"] == "sent"
+        assert record["attempt_count"] == 1
+        assert record["sent_msg_id"] == "msg-1"
+        assert record["sent_server_seq"] == 8
+
+    def test_mark_outbox_failed_by_failed_msg_id(self, db):
+        outbox_id = local_store.queue_e2ee_outbox(
+            db,
+            peer_did="did:b",
+            plaintext="hello",
+            session_id="sess-3",
+            credential_name="alice",
+        )
+        local_store.mark_e2ee_outbox_sent(
+            db,
+            outbox_id=outbox_id,
+            credential_name="alice",
+            session_id="sess-3",
+            sent_msg_id="msg-2",
+            sent_server_seq=11,
+        )
+
+        matched = local_store.mark_e2ee_outbox_failed(
+            db,
+            credential_name="alice",
+            peer_did="did:b",
+            failed_msg_id="msg-2",
+            error_code="decryption_failed",
+            retry_hint="resend",
+        )
+        assert matched == outbox_id
+
+        record = local_store.get_e2ee_outbox(
+            db, outbox_id=outbox_id, credential_name="alice"
+        )
+        assert record["local_status"] == "failed"
+        assert record["last_error_code"] == "decryption_failed"
+        assert record["retry_hint"] == "resend"
+
+    def test_list_failed_outbox(self, db):
+        outbox_id = local_store.queue_e2ee_outbox(
+            db,
+            peer_did="did:b",
+            plaintext="hello",
+            credential_name="alice",
+        )
+        local_store.update_e2ee_outbox_status(
+            db,
+            outbox_id=outbox_id,
+            local_status="failed",
+            credential_name="alice",
+        )
+        failed = local_store.list_e2ee_outbox(
+            db, credential_name="alice", local_status="failed"
+        )
+        assert len(failed) == 1
+        assert failed[0]["outbox_id"] == outbox_id
 
 
 class TestViews:

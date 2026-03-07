@@ -1,14 +1,15 @@
 """Unified status check: identity verification + inbox categorized summary + E2EE auto-processing.
 
 Usage:
-    python scripts/check_status.py                     # Basic status check
-    python scripts/check_status.py --auto-e2ee         # With E2EE auto-processing
+    python scripts/check_status.py                     # Status check with E2EE auto-processing
+    python scripts/check_status.py --no-auto-e2ee      # Disable E2EE auto-processing
     python scripts/check_status.py --credential alice   # Specify credential
 
 [INPUT]: SDK (RPC calls, E2eeClient), credential_store (authenticator factory), e2ee_store
 [OUTPUT]: Structured JSON status report (identity + inbox + e2ee_auto + e2ee_sessions),
           with inbox refreshed after optional auto-processing
-[POS]: Unified status check entry point for Agent session startup and heartbeat calls (HPKE E2EE scheme)
+[POS]: Unified status check entry point for Agent session startup and heartbeat calls
+       with default-on, server_seq-aware E2EE auto-processing (HPKE E2EE scheme)
 
 [PROTOCOL]:
 1. Update this header when logic changes
@@ -31,16 +32,32 @@ from utils import (
 )
 from credential_store import load_identity, create_authenticator
 from e2ee_store import load_e2ee_state, save_e2ee_state
+from e2ee_outbox import record_remote_failure
 
 
 MESSAGE_RPC = "/message/rpc"
 AUTH_RPC = "/user-service/did-auth/rpc"
 
 # E2EE protocol message types
-_E2EE_HANDSHAKE_TYPES = {"e2ee_init", "e2ee_rekey", "e2ee_error"}
+_E2EE_HANDSHAKE_TYPES = {"e2ee_init", "e2ee_ack", "e2ee_rekey", "e2ee_error"}
 _E2EE_SESSION_SETUP_TYPES = {"e2ee_init", "e2ee_rekey"}
-_E2EE_MSG_TYPES = {"e2ee_init", "e2ee_msg", "e2ee_rekey", "e2ee_error"}
-_E2EE_TYPE_ORDER = {"e2ee_init": 0, "e2ee_rekey": 1, "e2ee_msg": 2, "e2ee_error": 3}
+_E2EE_MSG_TYPES = {"e2ee_init", "e2ee_ack", "e2ee_msg", "e2ee_rekey", "e2ee_error"}
+_E2EE_TYPE_ORDER = {"e2ee_init": 0, "e2ee_ack": 1, "e2ee_rekey": 2, "e2ee_msg": 3, "e2ee_error": 4}
+
+
+def _message_sort_key(message: dict[str, Any]) -> tuple[Any, ...]:
+    """Build a stable E2EE inbox ordering key with server_seq priority inside a sender stream."""
+    sender_did = message.get("sender_did", "")
+    server_seq = message.get("server_seq")
+    has_server_seq = 0 if isinstance(server_seq, int) else 1
+    server_seq_value = server_seq if isinstance(server_seq, int) else 0
+    return (
+        sender_did,
+        has_server_seq,
+        server_seq_value,
+        message.get("created_at", ""),
+        _E2EE_TYPE_ORDER.get(message.get("type"), 99),
+    )
 
 
 # ---------- E2EE helpers ----------
@@ -228,11 +245,8 @@ async def auto_process_e2ee(
             if not e2ee_msgs:
                 return {"status": "ok", "processed": 0, "details": []}
 
-            # Sort by time + protocol order
-            e2ee_msgs.sort(key=lambda m: (
-                m.get("created_at", ""),
-                _E2EE_TYPE_ORDER.get(m.get("type"), 99),
-            ))
+            # Sort by sender stream + server_seq, fallback to created_at.
+            e2ee_msgs.sort(key=_message_sort_key)
 
             e2ee_client = _load_or_create_e2ee_client(data["did"], credential_name)
             details: list[dict[str, Any]] = []
@@ -244,8 +258,17 @@ async def auto_process_e2ee(
                 content = json.loads(msg["content"]) if isinstance(msg.get("content"), str) else msg.get("content", {})
 
                 try:
+                    if msg_type == "e2ee_error":
+                        record_remote_failure(
+                            credential_name=credential_name,
+                            peer_did=sender_did,
+                            content=content,
+                        )
                     responses = await e2ee_client.process_e2ee_message(msg_type, content)
                     session_ready = True
+                    terminal_error_notified = any(
+                        resp_type == "e2ee_error" for resp_type, _ in responses
+                    )
                     if msg_type in _E2EE_SESSION_SETUP_TYPES:
                         session_ready = e2ee_client.has_session_id(content.get("session_id"))
                     # Route responses to sender_did
@@ -261,6 +284,14 @@ async def auto_process_e2ee(
                             "sender_did": sender_did,
                             "responses_sent": len(responses),
                             "status": "processed",
+                        })
+                        processed_ids.append(msg["id"])
+                    elif terminal_error_notified:
+                        details.append({
+                            "msg_type": msg_type,
+                            "sender_did": sender_did,
+                            "responses_sent": len(responses),
+                            "status": "error_notified",
                         })
                         processed_ids.append(msg["id"])
                     else:
@@ -300,7 +331,7 @@ async def auto_process_e2ee(
 
 async def check_status(
     credential_name: str = "default",
-    auto_e2ee: bool = False,
+    auto_e2ee: bool = True,
 ) -> dict[str, Any]:
     """Unified status check orchestrator."""
     report: dict[str, Any] = {
@@ -340,8 +371,8 @@ async def check_status(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Unified status check")
     parser.add_argument(
-        "--auto-e2ee", action="store_true",
-        help="Automatically process E2EE protocol messages in inbox",
+        "--no-auto-e2ee", action="store_true",
+        help="Disable automatic processing of E2EE protocol messages in inbox",
     )
     parser.add_argument(
         "--credential", type=str, default="default",
@@ -349,7 +380,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    report = asyncio.run(check_status(args.credential, args.auto_e2ee))
+    report = asyncio.run(check_status(args.credential, not args.no_auto_e2ee))
     print(json.dumps(report, indent=2, ensure_ascii=False))
 
 

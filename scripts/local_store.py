@@ -1,10 +1,12 @@
-"""SQLite local storage for messages and contacts.
+"""SQLite local storage for messages, contacts, and E2EE outbox state.
 
 [INPUT]: SDKConfig (data_dir for database path)
 [OUTPUT]: get_connection(), ensure_schema(), store_message(), store_messages_batch(),
-         make_thread_id(), upsert_contact(), execute_sql()
-[POS]: Persistence layer — single shared SQLite database for offline message storage
-       and contact management, with per-credential message ownership
+         queue_e2ee_outbox(), mark_e2ee_outbox_sent(), mark_e2ee_outbox_failed(),
+         list_e2ee_outbox(), get_e2ee_outbox(), get_message_by_id(), make_thread_id(),
+         upsert_contact(), execute_sql()
+[POS]: Persistence layer — single shared SQLite database for offline message storage,
+       contact management, and resendable E2EE outbox tracking with per-credential ownership
 
 [PROTOCOL]:
 1. Update this header when logic changes
@@ -15,6 +17,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,7 +25,7 @@ from typing import Any
 from utils.config import SDKConfig
 
 # Current schema version (bump when schema changes)
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 # SQL patterns that are always forbidden
 _FORBIDDEN_PATTERNS = [
@@ -103,6 +106,27 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             PRIMARY KEY (msg_id, credential_name)
         );
 
+        CREATE TABLE IF NOT EXISTS e2ee_outbox (
+            outbox_id            TEXT PRIMARY KEY,
+            peer_did             TEXT NOT NULL,
+            session_id           TEXT,
+            original_type        TEXT NOT NULL DEFAULT 'text',
+            plaintext            TEXT NOT NULL,
+            local_status         TEXT NOT NULL DEFAULT 'queued',
+            attempt_count        INTEGER NOT NULL DEFAULT 0,
+            sent_msg_id          TEXT,
+            sent_server_seq      INTEGER,
+            last_error_code      TEXT,
+            retry_hint           TEXT,
+            failed_msg_id        TEXT,
+            failed_server_seq    INTEGER,
+            metadata             TEXT,
+            last_attempt_at      TEXT,
+            created_at           TEXT NOT NULL,
+            updated_at           TEXT NOT NULL,
+            credential_name      TEXT NOT NULL DEFAULT ''
+        );
+
         CREATE INDEX IF NOT EXISTS idx_messages_thread
             ON messages(thread_id, sent_at);
         CREATE INDEX IF NOT EXISTS idx_messages_direction
@@ -111,6 +135,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             ON messages(sender_did);
         CREATE INDEX IF NOT EXISTS idx_messages_credential
             ON messages(credential_name);
+        CREATE INDEX IF NOT EXISTS idx_e2ee_outbox_status
+            ON e2ee_outbox(credential_name, local_status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_e2ee_outbox_sent_msg
+            ON e2ee_outbox(credential_name, sent_msg_id);
+        CREATE INDEX IF NOT EXISTS idx_e2ee_outbox_sent_seq
+            ON e2ee_outbox(credential_name, peer_did, sent_server_seq);
     """)
 
     # Migration to v3: rebuild messages table so msg_id is deduplicated per credential.
@@ -353,6 +383,259 @@ def store_messages_batch(
         rows,
     )
     conn.commit()
+
+
+def queue_e2ee_outbox(
+    conn: sqlite3.Connection,
+    *,
+    peer_did: str,
+    plaintext: str,
+    session_id: str | None = None,
+    original_type: str = "text",
+    credential_name: str | None = None,
+    metadata: str | None = None,
+) -> str:
+    """Create or replace a local E2EE outbox record and return its ID."""
+    now = datetime.now(timezone.utc).isoformat()
+    outbox_id = str(uuid.uuid4())
+    conn.execute(
+        """INSERT INTO e2ee_outbox
+           (outbox_id, peer_did, session_id, original_type, plaintext, local_status,
+            attempt_count, metadata, last_attempt_at, created_at, updated_at, credential_name)
+           VALUES (?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?)""",
+        (
+            outbox_id,
+            peer_did,
+            session_id,
+            original_type,
+            plaintext,
+            metadata,
+            now,
+            now,
+            now,
+            _normalize_credential_name(credential_name),
+        ),
+    )
+    conn.commit()
+    return outbox_id
+
+
+def mark_e2ee_outbox_sent(
+    conn: sqlite3.Connection,
+    *,
+    outbox_id: str,
+    credential_name: str | None = None,
+    session_id: str | None = None,
+    sent_msg_id: str | None = None,
+    sent_server_seq: int | None = None,
+    metadata: str | None = None,
+) -> None:
+    """Mark an outbox record as successfully sent."""
+    now = datetime.now(timezone.utc).isoformat()
+    normalized_credential_name = _normalize_credential_name(credential_name)
+    conn.execute(
+        """UPDATE e2ee_outbox
+           SET session_id = COALESCE(?, session_id),
+               local_status = 'sent',
+               attempt_count = attempt_count + 1,
+               sent_msg_id = COALESCE(?, sent_msg_id),
+               sent_server_seq = COALESCE(?, sent_server_seq),
+               metadata = COALESCE(?, metadata),
+               last_attempt_at = ?,
+               updated_at = ?,
+               last_error_code = NULL,
+               retry_hint = NULL,
+               failed_msg_id = NULL,
+               failed_server_seq = NULL
+           WHERE outbox_id = ? AND credential_name = ?""",
+        (
+            session_id,
+            sent_msg_id,
+            sent_server_seq,
+            metadata,
+            now,
+            now,
+            outbox_id,
+            normalized_credential_name,
+        ),
+    )
+    conn.commit()
+
+
+def mark_e2ee_outbox_failed(
+    conn: sqlite3.Connection,
+    *,
+    credential_name: str | None = None,
+    error_code: str,
+    retry_hint: str | None = None,
+    peer_did: str | None = None,
+    session_id: str | None = None,
+    failed_msg_id: str | None = None,
+    failed_server_seq: int | None = None,
+    metadata: str | None = None,
+) -> str | None:
+    """Mark the best matching E2EE outbox record as failed and return its ID."""
+    normalized_credential_name = _normalize_credential_name(credential_name)
+
+    row = None
+    if failed_msg_id:
+        row = conn.execute(
+            """SELECT outbox_id FROM e2ee_outbox
+               WHERE credential_name = ? AND sent_msg_id = ?
+               ORDER BY updated_at DESC LIMIT 1""",
+            (normalized_credential_name, failed_msg_id),
+        ).fetchone()
+    if row is None and failed_server_seq is not None and peer_did:
+        row = conn.execute(
+            """SELECT outbox_id FROM e2ee_outbox
+               WHERE credential_name = ? AND peer_did = ? AND sent_server_seq = ?
+               ORDER BY updated_at DESC LIMIT 1""",
+            (normalized_credential_name, peer_did, failed_server_seq),
+        ).fetchone()
+    if row is None and session_id and peer_did:
+        row = conn.execute(
+            """SELECT outbox_id FROM e2ee_outbox
+               WHERE credential_name = ? AND peer_did = ? AND session_id = ?
+               ORDER BY updated_at DESC LIMIT 1""",
+            (normalized_credential_name, peer_did, session_id),
+        ).fetchone()
+    if row is None:
+        return None
+
+    now = datetime.now(timezone.utc).isoformat()
+    outbox_id = row["outbox_id"]
+    conn.execute(
+        """UPDATE e2ee_outbox
+           SET local_status = 'failed',
+               last_error_code = ?,
+               retry_hint = COALESCE(?, retry_hint),
+               failed_msg_id = COALESCE(?, failed_msg_id),
+               failed_server_seq = COALESCE(?, failed_server_seq),
+               metadata = COALESCE(?, metadata),
+               updated_at = ?
+           WHERE outbox_id = ? AND credential_name = ?""",
+        (
+            error_code,
+            retry_hint,
+            failed_msg_id,
+            failed_server_seq,
+            metadata,
+            now,
+            outbox_id,
+            normalized_credential_name,
+        ),
+    )
+    conn.commit()
+    return outbox_id
+
+
+def update_e2ee_outbox_status(
+    conn: sqlite3.Connection,
+    *,
+    outbox_id: str,
+    local_status: str,
+    credential_name: str | None = None,
+) -> None:
+    """Update an outbox record status without modifying send metadata."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """UPDATE e2ee_outbox
+           SET local_status = ?, updated_at = ?
+           WHERE outbox_id = ? AND credential_name = ?""",
+        (
+            local_status,
+            now,
+            outbox_id,
+            _normalize_credential_name(credential_name),
+        ),
+    )
+    conn.commit()
+
+
+def set_e2ee_outbox_failure_by_id(
+    conn: sqlite3.Connection,
+    *,
+    outbox_id: str,
+    credential_name: str | None = None,
+    error_code: str,
+    retry_hint: str | None = None,
+    metadata: str | None = None,
+) -> None:
+    """Mark one E2EE outbox record as failed by its outbox_id."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """UPDATE e2ee_outbox
+           SET local_status = 'failed',
+               last_error_code = ?,
+               retry_hint = COALESCE(?, retry_hint),
+               metadata = COALESCE(?, metadata),
+               updated_at = ?
+           WHERE outbox_id = ? AND credential_name = ?""",
+        (
+            error_code,
+            retry_hint,
+            metadata,
+            now,
+            outbox_id,
+            _normalize_credential_name(credential_name),
+        ),
+    )
+    conn.commit()
+
+
+def get_e2ee_outbox(
+    conn: sqlite3.Connection,
+    *,
+    outbox_id: str,
+    credential_name: str | None = None,
+) -> dict[str, Any] | None:
+    """Fetch one E2EE outbox record by ID."""
+    row = conn.execute(
+        """SELECT * FROM e2ee_outbox
+           WHERE outbox_id = ? AND credential_name = ?""",
+        (outbox_id, _normalize_credential_name(credential_name)),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def list_e2ee_outbox(
+    conn: sqlite3.Connection,
+    *,
+    credential_name: str | None = None,
+    local_status: str | None = None,
+) -> list[dict[str, Any]]:
+    """List E2EE outbox records, optionally filtered by status."""
+    normalized_credential_name = _normalize_credential_name(credential_name)
+    if local_status is None:
+        rows = conn.execute(
+            """SELECT * FROM e2ee_outbox
+               WHERE credential_name = ?
+               ORDER BY updated_at DESC""",
+            (normalized_credential_name,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT * FROM e2ee_outbox
+               WHERE credential_name = ? AND local_status = ?
+               ORDER BY updated_at DESC""",
+            (normalized_credential_name, local_status),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_message_by_id(
+    conn: sqlite3.Connection,
+    *,
+    msg_id: str,
+    credential_name: str | None = None,
+) -> dict[str, Any] | None:
+    """Fetch one locally stored message by message ID."""
+    row = conn.execute(
+        """SELECT * FROM messages
+           WHERE msg_id = ? AND credential_name = ?""",
+        (msg_id, _normalize_credential_name(credential_name)),
+    ).fetchone()
+    return dict(row) if row is not None else None
 
 
 def upsert_contact(

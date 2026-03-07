@@ -63,7 +63,7 @@ class ListenerConfig:
     # Current E2EE protocol message types (intercepted by the E2EE handler
     # before classify_message; legacy types are dropped by ws_listener guards).
     ignore_types: frozenset[str] = frozenset({
-        "e2ee_init", "e2ee_msg", "e2ee_rekey", "e2ee_error",
+        "e2ee_init", "e2ee_ack", "e2ee_msg", "e2ee_rekey", "e2ee_error",
     })
 
     # E2EE transparent handling (always enabled)

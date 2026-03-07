@@ -3,8 +3,9 @@
 [INPUT]: credential_store (E2EE keys), e2ee_store (state persistence), E2eeClient (encrypt/decrypt),
          build_e2ee_error (error response builder)
 [OUTPUT]: E2eeHandler class (protocol message handling + encrypted message decryption),
-          DecryptResult NamedTuple (decrypted params + error responses)
+          DecryptResult NamedTuple (decrypted params + structured error responses)
 [POS]: E2EE processing module for ws_listener.py, intercepts E2EE messages before classify_message
+       and emits sender-facing e2ee_error notifications with failed message identifiers
 
 [PROTOCOL]:
 1. Update this header when logic changes
@@ -21,15 +22,19 @@ from typing import Any, NamedTuple
 
 from credential_store import load_identity
 from e2ee_store import load_e2ee_state, save_e2ee_state
-from utils.e2ee import E2eeClient
-
-from anp.e2e_encryption_hpke import build_e2ee_error
+from e2ee_outbox import record_remote_failure
+from utils.e2ee import (
+    E2eeClient,
+    SUPPORTED_E2EE_VERSION,
+    build_e2ee_error_content,
+    build_e2ee_error_message,
+)
 
 logger = logging.getLogger(__name__)
 
 # E2EE message type sets
-_E2EE_ALL_TYPES = frozenset({"e2ee_init", "e2ee_msg", "e2ee_rekey", "e2ee_error"})
-_E2EE_PROTOCOL_TYPES = frozenset({"e2ee_init", "e2ee_rekey", "e2ee_error"})
+_E2EE_ALL_TYPES = frozenset({"e2ee_init", "e2ee_ack", "e2ee_msg", "e2ee_rekey", "e2ee_error"})
+_E2EE_PROTOCOL_TYPES = frozenset({"e2ee_init", "e2ee_ack", "e2ee_rekey", "e2ee_error"})
 
 
 class DecryptResult(NamedTuple):
@@ -141,6 +146,14 @@ class E2eeHandler:
 
         async with self._lock:
             try:
+                if msg_type == "e2ee_error":
+                    matched_outbox = record_remote_failure(
+                        credential_name=self._credential_name,
+                        peer_did=sender_did,
+                        content=content,
+                    )
+                    if matched_outbox:
+                        logger.info("Updated failed E2EE outbox record: %s", matched_outbox)
                 responses = await self._client.process_e2ee_message(msg_type, content)
                 self._dirty = True
                 logger.info(
@@ -189,11 +202,19 @@ class E2eeHandler:
                     "E2EE message decryption failed: sender=%s",
                     params.get("sender_did", "")[:20],
                 )
-                error_code = self._classify_error(exc)
-                error_content = build_e2ee_error(
+                error_code, retry_hint = self._classify_error(exc)
+                error_content = build_e2ee_error_content(
                     error_code=error_code,
                     session_id=content.get("session_id") if isinstance(content, dict) else None,
                     failed_msg_id=params.get("id"),
+                    failed_server_seq=params.get("server_seq"),
+                    retry_hint=retry_hint,
+                    required_e2ee_version=SUPPORTED_E2EE_VERSION if error_code == "unsupported_version" else None,
+                    message=build_e2ee_error_message(
+                        error_code,
+                        required_e2ee_version=SUPPORTED_E2EE_VERSION if error_code == "unsupported_version" else None,
+                        detail=str(exc),
+                    ),
                 )
                 return DecryptResult(
                     self._on_decrypt_fail(params),
@@ -241,16 +262,18 @@ class E2eeHandler:
             logger.exception("E2EE state save failed")
 
     @staticmethod
-    def _classify_error(exc: BaseException) -> str:
-        """Map a decryption exception to an E2EE error code."""
+    def _classify_error(exc: BaseException) -> tuple[str, str]:
+        """Map a decryption exception to an E2EE error code and retry hint."""
         msg = str(exc).lower()
-        if "session" in msg and "not found" in msg:
-            return "session_not_found"
+        if "unsupported_version" in msg:
+            return "unsupported_version", "drop"
+        if "session" in msg and ("not found" in msg or "find session" in msg):
+            return "session_not_found", "rekey_then_resend"
         if "expired" in msg:
-            return "session_expired"
+            return "session_expired", "rekey_then_resend"
         if "seq" in msg or "sequence" in msg:
-            return "invalid_seq"
-        return "decryption_failed"
+            return "invalid_seq", "rekey_then_resend"
+        return "decryption_failed", "resend"
 
     def _on_decrypt_fail(self, params: dict[str, Any]) -> dict[str, Any] | None:
         """Fallback strategy on decryption failure."""
