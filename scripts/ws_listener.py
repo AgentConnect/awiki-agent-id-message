@@ -185,8 +185,6 @@ async def _forward(
             lines.append(f"sent_at: {params['sent_at']}")
         if params.get("_e2ee"):
             lines.append("e2ee: true")
-        if params.get("title"):
-            lines.append(f"title: {params['title']}")
         lines.append("")
         if params.get("_e2ee"):
             lines.append(str(params.get("_e2ee_notice", "This is an encrypted message.")))

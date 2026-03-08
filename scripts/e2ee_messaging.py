@@ -435,8 +435,7 @@ def main() -> None:
                        help="Mark a failed local E2EE outbox record as dropped")
 
     parser.add_argument("--content", type=str, help="Message content (required with --send)")
-    parser.add_argument("--title", type=str, default=None,
-                        help="Message title (optional, plaintext even for E2EE)")
+    parser.add_argument("--title", type=str, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--peer", type=str,
                         help="Peer DID or handle (required with --process)")
     parser.add_argument("--credential", type=str, default="default",

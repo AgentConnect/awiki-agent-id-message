@@ -4,9 +4,6 @@ Usage:
     # Send a text message
     uv run python scripts/send_message.py --to "did:wba:localhost:user:abc123" --content "Hello!"
 
-    # Send with a title
-    uv run python scripts/send_message.py --to "did:wba:localhost:user:abc123" --content "Hello!" --title "Greeting"
-
     # Specify message type
     uv run python scripts/send_message.py --to "did:wba:localhost:user:abc123" --content "hello" --type text
 
@@ -14,7 +11,6 @@ Usage:
          local_store (local persistence), logging_config
 [OUTPUT]: Send result (with server_seq and client_msg_id)
 [POS]: Message sending script, auto-generates client_msg_id for idempotent delivery.
-       Supports optional title field (plaintext, not encrypted even for E2EE messages).
 
 [PROTOCOL]:
 1. Update this header when logic changes
@@ -37,6 +33,13 @@ import local_store
 
 MESSAGE_RPC = "/message/rpc"
 logger = logging.getLogger(__name__)
+
+
+def _strip_hidden_result_fields(result: dict[str, object]) -> dict[str, object]:
+    """Remove fields intentionally hidden from user-facing CLI output."""
+    rendered = dict(result)
+    rendered.pop("title", None)
+    return rendered
 
 
 async def send_message(
@@ -118,7 +121,7 @@ async def send_message(
             logger.debug("Failed to persist sent message locally", exc_info=True)
 
         print("Message sent successfully:")
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+        print(json.dumps(_strip_hidden_result_fields(result), indent=2, ensure_ascii=False))
         logger.info(
             "Message sent credential=%s msg_id=%s server_seq=%s",
             credential_name,
@@ -135,8 +138,7 @@ def main() -> None:
     parser.add_argument("--content", required=True, type=str, help="Message content")
     parser.add_argument("--type", type=str, default="text",
                         help="Message type (default: text)")
-    parser.add_argument("--title", type=str, default=None,
-                        help="Message title (optional, plaintext even for E2EE)")
+    parser.add_argument("--title", type=str, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--credential", type=str, default="default",
                         help="Credential name (default: default)")
 

@@ -48,7 +48,6 @@ python scripts/resolve_handle.py --did "<DID>"                # Look up handle b
 
 # Messaging (requires identity creation first)
 python scripts/send_message.py --to "<DID>" --content "hello"
-python scripts/send_message.py --to "<DID>" --content "hello" --title "Greeting"
 python scripts/check_inbox.py
 python scripts/check_inbox.py --history "<DID>"               # Chat history with a specific user
 python scripts/check_inbox.py --mark-read msg_id_1 msg_id_2
@@ -81,7 +80,6 @@ python scripts/manage_group.py --members --group-id GID
 python scripts/e2ee_messaging.py --handshake "<DID>"
 python scripts/e2ee_messaging.py --process --peer "<DID>"
 python scripts/e2ee_messaging.py --send "<DID>" --content "secret"
-python scripts/e2ee_messaging.py --send "<DID>" --content "secret" --title "Subject"
 
 # Unified status check
 python scripts/check_status.py                              # Default-on E2EE auto-processing

@@ -16,6 +16,7 @@ import e2ee_messaging
 import e2ee_handler
 import check_inbox
 import check_status
+import send_message as send_message_script
 from utils import e2ee as e2ee_utils
 
 
@@ -135,3 +136,15 @@ class TestUserVisibleE2eePresentation:
         assert check_status._is_user_visible_message_type("text") is True
         assert check_status._is_user_visible_message_type("e2ee_init") is False
         assert check_status._is_user_visible_message_type("e2ee_msg") is False
+
+    def test_check_inbox_strips_hidden_title_field(self):
+        rendered = check_inbox._strip_hidden_user_fields(
+            {"id": "m1", "content": "hello", "title": "secret-title"}
+        )
+        assert "title" not in rendered
+
+    def test_send_message_result_strips_hidden_title_field(self):
+        rendered = send_message_script._strip_hidden_result_fields(
+            {"id": "m1", "title": "hidden", "content": "hello"}
+        )
+        assert "title" not in rendered

@@ -333,14 +333,9 @@ cd <SKILL_DIR> && python scripts/send_message.py --to "alice.awiki.ai" --content
 # Send a message by DID
 cd <SKILL_DIR> && python scripts/send_message.py --to "did:wba:awiki.ai:user:bob" --content "Hello!"
 
-# Send a message with a title (optional, plaintext — not encrypted even for E2EE)
-cd <SKILL_DIR> && python scripts/send_message.py --to "alice" --content "Let's meet at 3pm" --title "Meeting Request"
-
 # Send a custom-type message
 cd <SKILL_DIR> && python scripts/send_message.py --to "did:wba:awiki.ai:user:bob" --content "{\"event\":\"invite\"}" --type "event"
 ```
-
-**Message title**: The `--title` parameter is optional. Title is always stored as plaintext on the server, even for E2EE messages — it is intentionally **not encrypted** so that AI Agents can see the message subject without decrypting the body. Use title for brief context like "Meeting Request", "Bug Report", etc.
 
 ### Checking Inbox (HTTP RPC)
 
@@ -432,9 +427,6 @@ cd <SKILL_DIR> && python scripts/e2ee_messaging.py --process --peer "did:wba:awi
 
 # Send encrypted message (auto-handshake if needed)
 cd <SKILL_DIR> && python scripts/e2ee_messaging.py --send "did:wba:awiki.ai:user:bob" --content "Secret message"
-
-# Send encrypted message with a title (title stays plaintext, not encrypted)
-cd <SKILL_DIR> && python scripts/e2ee_messaging.py --send "did:wba:awiki.ai:user:bob" --content "Secret message" --title "Confidential"
 
 # List failed encrypted send attempts
 cd <SKILL_DIR> && python scripts/e2ee_messaging.py --list-failed

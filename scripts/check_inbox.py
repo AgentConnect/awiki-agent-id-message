@@ -86,6 +86,14 @@ def _decorate_user_visible_e2ee_message(
     rendered["content"] = plaintext
     rendered["_e2ee"] = True
     rendered["_e2ee_notice"] = _E2EE_USER_NOTICE
+    rendered.pop("title", None)
+    return rendered
+
+
+def _strip_hidden_user_fields(message: dict[str, Any]) -> dict[str, Any]:
+    """Remove fields intentionally hidden from user-facing output."""
+    rendered = dict(message)
+    rendered.pop("title", None)
     return rendered
 
 
@@ -159,13 +167,13 @@ async def _auto_process_e2ee_messages(
             msg_type = msg.get("type", "")
             sender_did = msg.get("sender_did", "")
             if msg_type not in _E2EE_MSG_TYPES:
-                rendered_messages.append(msg)
+                rendered_messages.append(_strip_hidden_user_fields(msg))
                 continue
 
             try:
                 content = json.loads(msg.get("content", ""))
             except (TypeError, json.JSONDecodeError):
-                rendered_messages.append(msg)
+                rendered_messages.append(_strip_hidden_user_fields(msg))
                 continue
 
             if msg_type == "e2ee_msg":
@@ -174,7 +182,7 @@ async def _auto_process_e2ee_messages(
                         credential_name,
                         msg,
                     )
-                    rendered_messages.append(rendered or msg)
+                    rendered_messages.append(rendered or _strip_hidden_user_fields(msg))
                     continue
                 try:
                     original_type, plaintext = e2ee_client.decrypt_message(content)
