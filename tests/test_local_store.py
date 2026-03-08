@@ -14,6 +14,31 @@ sys.path.insert(0, str(_scripts_dir))
 
 import local_store  # noqa: E402
 
+EXPECTED_V6_INDEXES = {
+    "idx_contacts_owner",
+    "idx_messages_owner_thread",
+    "idx_messages_owner_direction",
+    "idx_messages_owner_sender",
+    "idx_messages_owner",
+    "idx_messages_credential",
+    "idx_e2ee_outbox_owner_status",
+    "idx_e2ee_outbox_owner_sent_msg",
+    "idx_e2ee_outbox_owner_sent_seq",
+    "idx_e2ee_outbox_credential",
+}
+
+
+def _schema_object_names(conn: sqlite3.Connection, object_type: str) -> set[str]:
+    """Return named schema objects for assertions."""
+    rows = conn.execute(
+        """
+        SELECT name FROM sqlite_master
+        WHERE type = ? AND name NOT LIKE 'sqlite_%'
+        """,
+        (object_type,),
+    ).fetchall()
+    return {row[0] for row in rows}
+
 
 @pytest.fixture()
 def db(tmp_path, monkeypatch):
@@ -40,15 +65,14 @@ class TestSchema:
         assert "e2ee_outbox" in tables
 
     def test_views_created(self, db):
-        views = {
-            row[0]
-            for row in db.execute(
-                "SELECT name FROM sqlite_master WHERE type='view'"
-            ).fetchall()
-        }
+        views = _schema_object_names(db, "view")
         assert "threads" in views
         assert "inbox" in views
         assert "outbox" in views
+
+    def test_expected_indexes_created(self, db):
+        indexes = _schema_object_names(db, "index")
+        assert EXPECTED_V6_INDEXES <= indexes
 
     def test_schema_version(self, db):
         version = db.execute("PRAGMA user_version").fetchone()[0]
@@ -88,6 +112,25 @@ class TestSchema:
         local_store.ensure_schema(conn)
         conn.close()
         assert (tmp_path / "database" / "awiki.db").exists()
+
+    def test_ensure_schema_repairs_missing_indexes_on_v6_database(self, db):
+        db.execute("DROP INDEX idx_messages_owner_thread")
+        db.execute("DROP INDEX idx_messages_owner_direction")
+        db.execute("DROP INDEX idx_e2ee_outbox_owner_status")
+        db.commit()
+
+        before_indexes = _schema_object_names(db, "index")
+        assert "idx_messages_owner_thread" not in before_indexes
+        assert "idx_messages_owner_direction" not in before_indexes
+        assert "idx_e2ee_outbox_owner_status" not in before_indexes
+
+        local_store.ensure_schema(db)
+
+        after_indexes = _schema_object_names(db, "index")
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+
+        assert version == 6
+        assert EXPECTED_V6_INDEXES <= after_indexes
 
 
 class TestThreadId:
@@ -430,9 +473,9 @@ class TestExecuteSql:
 
 
 class TestMigration:
-    """Migration from v4 to v5 should add owner_did isolation."""
+    """Migration from legacy schemas should preserve v6 ownership semantics."""
 
-    def test_migrate_v4_schema_to_v5(self, tmp_path, monkeypatch):
+    def test_migrate_v4_schema_to_v6(self, tmp_path, monkeypatch):
         monkeypatch.setenv("AWIKI_DATA_DIR", str(tmp_path))
         monkeypatch.setenv("HOME", str(tmp_path))
         db_dir = tmp_path / "database"

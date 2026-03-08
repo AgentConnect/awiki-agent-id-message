@@ -23,7 +23,6 @@ import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from utils.config import SDKConfig
@@ -31,6 +30,142 @@ from utils.config import SDKConfig
 logger = logging.getLogger(__name__)
 
 _SCHEMA_VERSION = 6
+
+_V6_TABLES_SQL = """
+    CREATE TABLE IF NOT EXISTS contacts (
+        owner_did       TEXT NOT NULL DEFAULT '',
+        did             TEXT NOT NULL,
+        name            TEXT,
+        handle          TEXT,
+        nick_name       TEXT,
+        bio             TEXT,
+        profile_md      TEXT,
+        tags            TEXT,
+        relationship    TEXT,
+        first_seen_at   TEXT,
+        last_seen_at    TEXT,
+        metadata        TEXT,
+        PRIMARY KEY (owner_did, did)
+    );
+
+    CREATE TABLE IF NOT EXISTS messages (
+        msg_id          TEXT NOT NULL,
+        owner_did       TEXT NOT NULL DEFAULT '',
+        thread_id       TEXT NOT NULL,
+        direction       INTEGER NOT NULL DEFAULT 0,
+        sender_did      TEXT,
+        receiver_did    TEXT,
+        group_id        TEXT,
+        group_did       TEXT,
+        content_type    TEXT DEFAULT 'text',
+        content         TEXT,
+        title           TEXT,
+        server_seq      INTEGER,
+        sent_at         TEXT,
+        stored_at       TEXT NOT NULL,
+        is_e2ee         INTEGER DEFAULT 0,
+        is_read         INTEGER DEFAULT 0,
+        sender_name     TEXT,
+        metadata        TEXT,
+        credential_name TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (msg_id, owner_did)
+    );
+
+    CREATE TABLE IF NOT EXISTS e2ee_outbox (
+        outbox_id            TEXT PRIMARY KEY,
+        owner_did            TEXT NOT NULL DEFAULT '',
+        peer_did             TEXT NOT NULL,
+        session_id           TEXT,
+        original_type        TEXT NOT NULL DEFAULT 'text',
+        plaintext            TEXT NOT NULL,
+        local_status         TEXT NOT NULL DEFAULT 'queued',
+        attempt_count        INTEGER NOT NULL DEFAULT 0,
+        sent_msg_id          TEXT,
+        sent_server_seq      INTEGER,
+        last_error_code      TEXT,
+        retry_hint           TEXT,
+        failed_msg_id        TEXT,
+        failed_server_seq    INTEGER,
+        metadata             TEXT,
+        last_attempt_at      TEXT,
+        created_at           TEXT NOT NULL,
+        updated_at           TEXT NOT NULL,
+        credential_name      TEXT NOT NULL DEFAULT ''
+    );
+"""
+
+_V6_INDEX_STATEMENTS = {
+    "idx_contacts_owner": """
+        CREATE INDEX IF NOT EXISTS idx_contacts_owner
+            ON contacts(owner_did, last_seen_at DESC)
+    """,
+    "idx_messages_owner_thread": """
+        CREATE INDEX IF NOT EXISTS idx_messages_owner_thread
+            ON messages(owner_did, thread_id, sent_at)
+    """,
+    "idx_messages_owner_direction": """
+        CREATE INDEX IF NOT EXISTS idx_messages_owner_direction
+            ON messages(owner_did, direction)
+    """,
+    "idx_messages_owner_sender": """
+        CREATE INDEX IF NOT EXISTS idx_messages_owner_sender
+            ON messages(owner_did, sender_did)
+    """,
+    "idx_messages_owner": """
+        CREATE INDEX IF NOT EXISTS idx_messages_owner
+            ON messages(owner_did)
+    """,
+    "idx_messages_credential": """
+        CREATE INDEX IF NOT EXISTS idx_messages_credential
+            ON messages(credential_name)
+    """,
+    "idx_e2ee_outbox_owner_status": """
+        CREATE INDEX IF NOT EXISTS idx_e2ee_outbox_owner_status
+            ON e2ee_outbox(owner_did, local_status, updated_at DESC)
+    """,
+    "idx_e2ee_outbox_owner_sent_msg": """
+        CREATE INDEX IF NOT EXISTS idx_e2ee_outbox_owner_sent_msg
+            ON e2ee_outbox(owner_did, sent_msg_id)
+    """,
+    "idx_e2ee_outbox_owner_sent_seq": """
+        CREATE INDEX IF NOT EXISTS idx_e2ee_outbox_owner_sent_seq
+            ON e2ee_outbox(owner_did, peer_did, sent_server_seq)
+    """,
+    "idx_e2ee_outbox_credential": """
+        CREATE INDEX IF NOT EXISTS idx_e2ee_outbox_credential
+            ON e2ee_outbox(credential_name)
+    """,
+}
+
+_V6_VIEW_STATEMENTS = {
+    "threads": """
+        CREATE VIEW threads AS
+        SELECT
+            owner_did,
+            thread_id,
+            COUNT(*)                                        AS message_count,
+            SUM(CASE WHEN is_read = 0 AND direction = 0
+                     THEN 1 ELSE 0 END)                    AS unread_count,
+            MAX(COALESCE(sent_at, stored_at))               AS last_message_at,
+            (SELECT m2.content FROM messages m2
+             WHERE m2.owner_did = m.owner_did
+               AND m2.thread_id = m.thread_id
+             ORDER BY COALESCE(m2.sent_at, m2.stored_at) DESC
+             LIMIT 1)                                       AS last_content
+        FROM messages m
+        GROUP BY owner_did, thread_id
+    """,
+    "inbox": """
+        CREATE VIEW inbox AS
+        SELECT * FROM messages WHERE direction = 0
+        ORDER BY owner_did, COALESCE(sent_at, stored_at) DESC
+    """,
+    "outbox": """
+        CREATE VIEW outbox AS
+        SELECT * FROM messages WHERE direction = 1
+        ORDER BY owner_did, COALESCE(sent_at, stored_at) DESC
+    """,
+}
 
 _FORBIDDEN_PATTERNS = [
     re.compile(r"\bDROP\b", re.IGNORECASE),
@@ -73,124 +208,55 @@ def _normalize_owner_did(owner_did: str | None) -> str:
     return owner_did or ""
 
 
+def _schema_object_exists(
+    conn: sqlite3.Connection,
+    *,
+    object_type: str,
+    object_name: str,
+) -> bool:
+    """Return whether a schema object exists."""
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = ? AND name = ?",
+        (object_type, object_name),
+    ).fetchone()
+    return row is not None
+
+
+def _ensure_v6_indexes(conn: sqlite3.Connection) -> list[str]:
+    """Create any missing v6 indexes and return the repaired index names."""
+    repaired_indexes: list[str] = []
+    for index_name, statement in _V6_INDEX_STATEMENTS.items():
+        if _schema_object_exists(conn, object_type="index", object_name=index_name):
+            continue
+        conn.execute(statement)
+        repaired_indexes.append(index_name)
+    return repaired_indexes
+
+
+def _recreate_v6_views(conn: sqlite3.Connection) -> None:
+    """Recreate the canonical v6 views."""
+    for view_name in _V6_VIEW_STATEMENTS:
+        conn.execute(f"DROP VIEW IF EXISTS {view_name}")
+    for statement in _V6_VIEW_STATEMENTS.values():
+        conn.execute(statement)
+
+
+def _ensure_v6_views(conn: sqlite3.Connection) -> list[str]:
+    """Create any missing v6 views and return the repaired view names."""
+    repaired_views: list[str] = []
+    for view_name, statement in _V6_VIEW_STATEMENTS.items():
+        if _schema_object_exists(conn, object_type="view", object_name=view_name):
+            continue
+        conn.execute(statement)
+        repaired_views.append(view_name)
+    return repaired_views
+
+
 def _create_schema_v6(conn: sqlite3.Connection) -> None:
     """Create the owner_did-aware schema."""
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS contacts (
-            owner_did       TEXT NOT NULL DEFAULT '',
-            did             TEXT NOT NULL,
-            name            TEXT,
-            handle          TEXT,
-            nick_name       TEXT,
-            bio             TEXT,
-            profile_md      TEXT,
-            tags            TEXT,
-            relationship    TEXT,
-            first_seen_at   TEXT,
-            last_seen_at    TEXT,
-            metadata        TEXT,
-            PRIMARY KEY (owner_did, did)
-        );
-
-        CREATE TABLE IF NOT EXISTS messages (
-            msg_id          TEXT NOT NULL,
-            owner_did       TEXT NOT NULL DEFAULT '',
-            thread_id       TEXT NOT NULL,
-            direction       INTEGER NOT NULL DEFAULT 0,
-            sender_did      TEXT,
-            receiver_did    TEXT,
-            group_id        TEXT,
-            group_did       TEXT,
-            content_type    TEXT DEFAULT 'text',
-            content         TEXT,
-            title           TEXT,
-            server_seq      INTEGER,
-            sent_at         TEXT,
-            stored_at       TEXT NOT NULL,
-            is_e2ee         INTEGER DEFAULT 0,
-            is_read         INTEGER DEFAULT 0,
-            sender_name     TEXT,
-            metadata        TEXT,
-            credential_name TEXT NOT NULL DEFAULT '',
-            PRIMARY KEY (msg_id, owner_did)
-        );
-
-        CREATE TABLE IF NOT EXISTS e2ee_outbox (
-            outbox_id            TEXT PRIMARY KEY,
-            owner_did            TEXT NOT NULL DEFAULT '',
-            peer_did             TEXT NOT NULL,
-            session_id           TEXT,
-            original_type        TEXT NOT NULL DEFAULT 'text',
-            plaintext            TEXT NOT NULL,
-            local_status         TEXT NOT NULL DEFAULT 'queued',
-            attempt_count        INTEGER NOT NULL DEFAULT 0,
-            sent_msg_id          TEXT,
-            sent_server_seq      INTEGER,
-            last_error_code      TEXT,
-            retry_hint           TEXT,
-            failed_msg_id        TEXT,
-            failed_server_seq    INTEGER,
-            metadata             TEXT,
-            last_attempt_at      TEXT,
-            created_at           TEXT NOT NULL,
-            updated_at           TEXT NOT NULL,
-            credential_name      TEXT NOT NULL DEFAULT ''
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_contacts_owner
-            ON contacts(owner_did, last_seen_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_messages_owner_thread
-            ON messages(owner_did, thread_id, sent_at);
-        CREATE INDEX IF NOT EXISTS idx_messages_owner_direction
-            ON messages(owner_did, direction);
-        CREATE INDEX IF NOT EXISTS idx_messages_owner_sender
-            ON messages(owner_did, sender_did);
-        CREATE INDEX IF NOT EXISTS idx_messages_owner
-            ON messages(owner_did);
-        CREATE INDEX IF NOT EXISTS idx_messages_credential
-            ON messages(credential_name);
-        CREATE INDEX IF NOT EXISTS idx_e2ee_outbox_owner_status
-            ON e2ee_outbox(owner_did, local_status, updated_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_e2ee_outbox_owner_sent_msg
-            ON e2ee_outbox(owner_did, sent_msg_id);
-        CREATE INDEX IF NOT EXISTS idx_e2ee_outbox_owner_sent_seq
-            ON e2ee_outbox(owner_did, peer_did, sent_server_seq);
-        CREATE INDEX IF NOT EXISTS idx_e2ee_outbox_credential
-            ON e2ee_outbox(credential_name);
-        """
-    )
-
-    conn.executescript(
-        """
-        DROP VIEW IF EXISTS threads;
-        CREATE VIEW threads AS
-        SELECT
-            owner_did,
-            thread_id,
-            COUNT(*)                                        AS message_count,
-            SUM(CASE WHEN is_read = 0 AND direction = 0
-                     THEN 1 ELSE 0 END)                    AS unread_count,
-            MAX(COALESCE(sent_at, stored_at))               AS last_message_at,
-            (SELECT m2.content FROM messages m2
-             WHERE m2.owner_did = m.owner_did
-               AND m2.thread_id = m.thread_id
-             ORDER BY COALESCE(m2.sent_at, m2.stored_at) DESC
-             LIMIT 1)                                       AS last_content
-        FROM messages m
-        GROUP BY owner_did, thread_id;
-
-        DROP VIEW IF EXISTS inbox;
-        CREATE VIEW inbox AS
-        SELECT * FROM messages WHERE direction = 0
-        ORDER BY owner_did, COALESCE(sent_at, stored_at) DESC;
-
-        DROP VIEW IF EXISTS outbox;
-        CREATE VIEW outbox AS
-        SELECT * FROM messages WHERE direction = 1
-        ORDER BY owner_did, COALESCE(sent_at, stored_at) DESC;
-        """
-    )
+    conn.executescript(_V6_TABLES_SQL)
+    _ensure_v6_indexes(conn)
+    _recreate_v6_views(conn)
 
 
 def _load_credential_owner_dids() -> dict[str, str]:
@@ -448,7 +514,19 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     """Create tables, views, and indexes if they don't exist."""
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version >= _SCHEMA_VERSION:
-        logger.debug("Local schema already up to date version=%d", version)
+        conn.executescript(_V6_TABLES_SQL)
+        repaired_indexes = _ensure_v6_indexes(conn)
+        repaired_views = _ensure_v6_views(conn)
+        if repaired_indexes or repaired_views:
+            conn.commit()
+            logger.warning(
+                "Repaired local schema objects version=%d indexes=%s views=%s",
+                version,
+                repaired_indexes,
+                repaired_views,
+            )
+        else:
+            logger.debug("Local schema already up to date version=%d", version)
         return
 
     if version == 0:

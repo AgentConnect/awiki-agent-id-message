@@ -4,7 +4,8 @@
 [OUTPUT]: detect_local_database_layout(), migrate_local_database(),
           ensure_local_database_ready()
 [POS]: Shared migration module used by check_status.py and the standalone
-       migrate_local_database.py CLI
+       migrate_local_database.py CLI, with idempotent self-healing for
+       already-ready databases
 
 [PROTOCOL]:
 1. Update this header when logic changes
@@ -81,6 +82,30 @@ def _backup_database(config: SDKConfig | None = None) -> Path:
     return backup_path
 
 
+def _ensure_database_schema(
+    *,
+    db_path: str,
+    status: str,
+    backup_path: str | None,
+) -> dict[str, Any]:
+    """Run idempotent schema repair and return the migration summary."""
+    conn = local_store.get_connection()
+    try:
+        before_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        local_store.ensure_schema(conn)
+        after_version = conn.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        conn.close()
+
+    return {
+        "status": status,
+        "db_path": db_path,
+        "before_version": before_version,
+        "after_version": after_version,
+        "backup_path": backup_path,
+    }
+
+
 def migrate_local_database(config: SDKConfig | None = None) -> dict[str, Any]:
     """Migrate the local SQLite database to the latest schema."""
     detection = detect_local_database_layout(config)
@@ -93,36 +118,24 @@ def migrate_local_database(config: SDKConfig | None = None) -> dict[str, Any]:
             "backup_path": None,
         }
     if detection["status"] == "ready":
-        return {
-            "status": "ready",
-            "db_path": detection["db_path"],
-            "before_version": detection["before_version"],
-            "after_version": detection["before_version"],
-            "backup_path": None,
-        }
+        return _ensure_database_schema(
+            db_path=detection["db_path"],
+            status="ready",
+            backup_path=None,
+        )
 
     backup_path = _backup_database(config)
-    conn = local_store.get_connection()
-    try:
-        before_version = conn.execute("PRAGMA user_version").fetchone()[0]
-        local_store.ensure_schema(conn)
-        after_version = conn.execute("PRAGMA user_version").fetchone()[0]
-    finally:
-        conn.close()
-
-    return {
-        "status": "migrated",
-        "db_path": detection["db_path"],
-        "before_version": before_version,
-        "after_version": after_version,
-        "backup_path": str(backup_path),
-    }
+    return _ensure_database_schema(
+        db_path=detection["db_path"],
+        status="migrated",
+        backup_path=str(backup_path),
+    )
 
 
 def ensure_local_database_ready(config: SDKConfig | None = None) -> dict[str, Any]:
     """Ensure the local database is ready for multi-identity use."""
     detection = detect_local_database_layout(config)
-    if detection["status"] in {"not_found", "ready"}:
+    if detection["status"] == "not_found":
         return detection
     return migrate_local_database(config)
 
