@@ -243,12 +243,14 @@ def _render_local_outgoing_e2ee_message(
     msg_id = message.get("id") or message.get("msg_id")
     if not msg_id:
         return None
+    credential = load_identity(credential_name)
     try:
         conn = local_store.get_connection()
         local_store.ensure_schema(conn)
         stored = local_store.get_message_by_id(
             conn,
             msg_id=msg_id,
+            owner_did=credential.get("did") if credential else None,
             credential_name=credential_name,
         )
         conn.close()
@@ -413,7 +415,12 @@ def _store_inbox_messages(
                 "sent_at": msg.get("sent_at") or msg.get("created_at"),
                 "sender_name": msg.get("sender_name"),
             })
-        local_store.store_messages_batch(conn, batch, credential_name=credential_name)
+        local_store.store_messages_batch(
+            conn,
+            batch,
+            owner_did=my_did,
+            credential_name=credential_name,
+        )
         # Record senders in contacts
         seen_dids: set[str] = set()
         for msg in messages:
@@ -421,7 +428,10 @@ def _store_inbox_messages(
             if s and s not in seen_dids:
                 seen_dids.add(s)
                 local_store.upsert_contact(
-                    conn, did=s, name=msg.get("sender_name"),
+                    conn,
+                    owner_did=my_did,
+                    did=s,
+                    name=msg.get("sender_name"),
                 )
         conn.close()
     except Exception:
@@ -458,7 +468,12 @@ def _store_history_messages(
                 "sent_at": msg.get("sent_at") or msg.get("created_at"),
                 "sender_name": msg.get("sender_name"),
             })
-        local_store.store_messages_batch(conn, batch, credential_name=credential_name)
+        local_store.store_messages_batch(
+            conn,
+            batch,
+            owner_did=my_did,
+            credential_name=credential_name,
+        )
         # Record senders in contacts
         seen_dids: set[str] = set()
         for msg in messages:
@@ -466,7 +481,10 @@ def _store_history_messages(
             if s and s not in seen_dids:
                 seen_dids.add(s)
                 local_store.upsert_contact(
-                    conn, did=s, name=msg.get("sender_name"),
+                    conn,
+                    owner_did=my_did,
+                    did=s,
+                    name=msg.get("sender_name"),
                 )
         conn.close()
     except Exception:

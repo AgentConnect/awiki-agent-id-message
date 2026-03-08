@@ -6,7 +6,7 @@ Usage:
     python scripts/check_status.py --credential alice   # Specify credential
 
 [INPUT]: SDK (RPC calls, E2eeClient), credential_store (authenticator factory),
-         e2ee_store, credential_migration, logging_config
+         e2ee_store, credential_migration, database_migration, logging_config
 [OUTPUT]: Structured JSON status report (identity + inbox + e2ee_auto + e2ee_sessions),
           with inbox refreshed after optional auto-processing
 [POS]: Unified status check entry point for Agent session startup and heartbeat calls
@@ -34,6 +34,7 @@ from utils import (
 )
 from utils.logging_config import configure_logging
 from credential_migration import ensure_credential_storage_ready
+from database_migration import ensure_local_database_ready
 from credential_store import load_identity, create_authenticator
 from e2ee_store import load_e2ee_state, save_e2ee_state
 from e2ee_outbox import record_remote_failure
@@ -330,6 +331,19 @@ async def check_status(
             "name": None,
             "jwt_valid": False,
             "error": "Credential storage migration failed or is incomplete",
+        }
+        report["inbox"] = {"status": "skipped", "total": 0}
+        report["e2ee_sessions"] = {"active": 0}
+        return report
+
+    report["local_database"] = ensure_local_database_ready()
+    if report["local_database"]["status"] == "error":
+        report["identity"] = {
+            "status": "local_database_migration_failed",
+            "did": None,
+            "name": None,
+            "jwt_valid": False,
+            "error": "Local database migration failed",
         }
         report["inbox"] = {"status": "skipped", "total": 0}
         report["e2ee_sessions"] = {"active": 0}

@@ -36,6 +36,7 @@ from pathlib import Path
 from utils import SDKConfig, create_user_service_client, authenticated_rpc_call, resolve_to_did
 from utils.logging_config import configure_logging
 from credential_store import create_authenticator
+import local_store
 
 
 RPC_ENDPOINT = "/user-service/did/relationships/rpc"
@@ -51,12 +52,24 @@ async def follow(target_did: str, credential_name: str = "default") -> None:
         print(f"Credential '{credential_name}' unavailable; please create an identity first")
         sys.exit(1)
 
-    auth, _ = auth_result
+    auth, data = auth_result
     async with create_user_service_client(config) as client:
         result = await authenticated_rpc_call(
             client, RPC_ENDPOINT, "follow", {"target_did": target_did},
             auth=auth, credential_name=credential_name,
         )
+        try:
+            conn = local_store.get_connection()
+            local_store.ensure_schema(conn)
+            local_store.upsert_contact(
+                conn,
+                owner_did=data["did"],
+                did=target_did,
+                relationship="following",
+            )
+            conn.close()
+        except Exception:
+            logger.debug("Failed to persist follow relationship locally", exc_info=True)
         print("Follow succeeded:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
@@ -70,12 +83,24 @@ async def unfollow(target_did: str, credential_name: str = "default") -> None:
         print(f"Credential '{credential_name}' unavailable; please create an identity first")
         sys.exit(1)
 
-    auth, _ = auth_result
+    auth, data = auth_result
     async with create_user_service_client(config) as client:
         result = await authenticated_rpc_call(
             client, RPC_ENDPOINT, "unfollow", {"target_did": target_did},
             auth=auth, credential_name=credential_name,
         )
+        try:
+            conn = local_store.get_connection()
+            local_store.ensure_schema(conn)
+            local_store.upsert_contact(
+                conn,
+                owner_did=data["did"],
+                did=target_did,
+                relationship="none",
+            )
+            conn.close()
+        except Exception:
+            logger.debug("Failed to persist unfollow relationship locally", exc_info=True)
         print("Unfollow succeeded:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
 

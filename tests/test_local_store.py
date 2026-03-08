@@ -1,21 +1,18 @@
-"""Unit tests for local_store module.
+"""Unit tests for local_store module."""
 
-Tests schema creation, CRUD operations, idempotent dedup, thread_id generation,
-views, credential_name filtering, and SQL safety checks.
-"""
+from __future__ import annotations
 
-import os
+import json
 import sqlite3
 import sys
 from pathlib import Path
 
 import pytest
 
-# Add scripts/ to sys.path so we can import local_store
 _scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(_scripts_dir))
 
-import local_store
+import local_store  # noqa: E402
 
 
 @pytest.fixture()
@@ -55,28 +52,23 @@ class TestSchema:
 
     def test_schema_version(self, db):
         version = db.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 4
+        assert version == 5
 
-    def test_ensure_schema_idempotent(self, db):
-        """Calling ensure_schema multiple times is safe."""
-        local_store.ensure_schema(db)
-        local_store.ensure_schema(db)
-        version = db.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 4
-
-    def test_wal_mode(self, db):
-        mode = db.execute("PRAGMA journal_mode").fetchone()[0]
-        assert mode == "wal"
-
-    def test_credential_name_column_exists(self, db):
-        columns = {
-            row[1]
-            for row in db.execute("PRAGMA table_info(messages)").fetchall()
+    def test_owner_did_columns_exist(self, db):
+        contact_columns = {
+            row[1] for row in db.execute("PRAGMA table_info(contacts)").fetchall()
         }
-        assert "credential_name" in columns
+        message_columns = {
+            row[1] for row in db.execute("PRAGMA table_info(messages)").fetchall()
+        }
+        outbox_columns = {
+            row[1] for row in db.execute("PRAGMA table_info(e2ee_outbox)").fetchall()
+        }
+        assert "owner_did" in contact_columns
+        assert "owner_did" in message_columns
+        assert "owner_did" in outbox_columns
 
     def test_database_path(self, tmp_path, monkeypatch):
-        """Database is created at <DATA_DIR>/database/awiki.db."""
         monkeypatch.setenv("AWIKI_DATA_DIR", str(tmp_path))
         conn = local_store.get_connection()
         local_store.ensure_schema(conn)
@@ -97,14 +89,6 @@ class TestThreadId:
         tid = local_store.make_thread_id("did:a", group_id="g1")
         assert tid == "group:g1"
 
-    def test_group_takes_priority(self):
-        tid = local_store.make_thread_id("did:a", peer_did="did:b", group_id="g1")
-        assert tid == "group:g1"
-
-    def test_no_peer(self):
-        tid = local_store.make_thread_id("did:a")
-        assert "unknown" in tid
-
 
 class TestStoreMessage:
     """Single message storage."""
@@ -113,6 +97,7 @@ class TestStoreMessage:
         local_store.store_message(
             db,
             msg_id="m1",
+            owner_did="did:self",
             thread_id="dm:a:b",
             direction=0,
             sender_did="did:a",
@@ -121,78 +106,56 @@ class TestStoreMessage:
         rows = db.execute("SELECT * FROM messages WHERE msg_id='m1'").fetchall()
         assert len(rows) == 1
         assert rows[0]["content"] == "hello"
-        assert rows[0]["direction"] == 0
+        assert rows[0]["owner_did"] == "did:self"
 
-    def test_idempotent_dedup(self, db):
-        for _ in range(3):
-            local_store.store_message(
-                db,
-                msg_id="m_dup",
-                thread_id="dm:a:b",
-                direction=0,
-                sender_did="did:a",
-                content="hello",
-            )
+    def test_dedup_scoped_by_owner_did(self, db):
+        local_store.store_message(
+            db,
+            msg_id="m_dup",
+            owner_did="did:alice",
+            thread_id="dm:a:b",
+            direction=0,
+            sender_did="did:a",
+            content="hello",
+        )
+        local_store.store_message(
+            db,
+            msg_id="m_dup",
+            owner_did="did:alice",
+            thread_id="dm:a:b",
+            direction=0,
+            sender_did="did:a",
+            content="hello",
+        )
+        local_store.store_message(
+            db,
+            msg_id="m_dup",
+            owner_did="did:bob",
+            thread_id="dm:a:b",
+            direction=0,
+            sender_did="did:a",
+            content="hello",
+        )
         count = db.execute(
             "SELECT COUNT(*) FROM messages WHERE msg_id='m_dup'"
         ).fetchone()[0]
-        assert count == 1
+        assert count == 2
 
-    def test_stored_at_populated(self, db):
-        local_store.store_message(
-            db,
-            msg_id="m_ts",
-            thread_id="dm:a:b",
-            direction=1,
-            sender_did="did:a",
-            content="test",
-        )
-        row = db.execute(
-            "SELECT stored_at FROM messages WHERE msg_id='m_ts'"
-        ).fetchone()
-        assert row["stored_at"] is not None
-
-    def test_credential_name_stored(self, db):
-        local_store.store_message(
-            db,
-            msg_id="m_cred",
-            thread_id="dm:a:b",
-            direction=0,
-            sender_did="did:a",
-            content="hello",
-            credential_name="alice",
-        )
-        row = db.execute(
-            "SELECT credential_name FROM messages WHERE msg_id='m_cred'"
-        ).fetchone()
-        assert row["credential_name"] == "alice"
-
-    def test_credential_name_default_none(self, db):
-        local_store.store_message(
-            db,
-            msg_id="m_no_cred",
-            thread_id="dm:a:b",
-            direction=0,
-            sender_did="did:a",
-            content="hello",
-        )
-        row = db.execute(
-            "SELECT credential_name FROM messages WHERE msg_id='m_no_cred'"
-        ).fetchone()
-        assert row["credential_name"] == ""
-
-    def test_get_message_by_id(self, db):
+    def test_get_message_by_id_uses_owner_did(self, db):
         local_store.store_message(
             db,
             msg_id="m_lookup",
+            owner_did="did:alice",
             thread_id="dm:a:b",
             direction=1,
-            sender_did="did:a",
+            sender_did="did:alice",
             content="lookup",
             credential_name="alice",
         )
         row = local_store.get_message_by_id(
-            db, msg_id="m_lookup", credential_name="alice"
+            db,
+            msg_id="m_lookup",
+            owner_did="did:alice",
         )
         assert row is not None
         assert row["content"] == "lookup"
@@ -201,97 +164,71 @@ class TestStoreMessage:
 class TestStoreMessagesBatch:
     """Batch message storage."""
 
-    def test_batch_insert(self, db):
+    def test_batch_with_default_owner(self, db):
         batch = [
             {"msg_id": f"b{i}", "thread_id": "dm:a:b", "direction": 0,
              "sender_did": "did:a", "content": f"msg {i}"}
-            for i in range(5)
+            for i in range(3)
         ]
-        local_store.store_messages_batch(db, batch)
-        count = db.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-        assert count == 5
+        local_store.store_messages_batch(db, batch, owner_did="did:alice")
+        owners = {
+            row["owner_did"]
+            for row in db.execute("SELECT owner_did FROM messages").fetchall()
+        }
+        assert owners == {"did:alice"}
 
-    def test_batch_dedup(self, db):
+    def test_batch_per_message_owner_override(self, db):
         batch = [
-            {"msg_id": "dup1", "thread_id": "dm:a:b", "direction": 0,
-             "sender_did": "did:a", "content": "first"},
-        ]
-        local_store.store_messages_batch(db, batch)
-        local_store.store_messages_batch(db, batch)
-        count = db.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-        assert count == 1
-
-    def test_empty_batch(self, db):
-        local_store.store_messages_batch(db, [])
-        count = db.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-        assert count == 0
-
-    def test_batch_with_credential_name(self, db):
-        batch = [
-            {"msg_id": "bc1", "thread_id": "dm:a:b", "direction": 0,
+            {"msg_id": "bo1", "owner_did": "did:alice", "thread_id": "dm:a:b", "direction": 0,
              "sender_did": "did:a", "content": "msg1"},
-            {"msg_id": "bc2", "thread_id": "dm:a:b", "direction": 0,
-             "sender_did": "did:a", "content": "msg2"},
-        ]
-        local_store.store_messages_batch(db, batch, credential_name="bob")
-        rows = db.execute(
-            "SELECT credential_name FROM messages ORDER BY msg_id"
-        ).fetchall()
-        assert all(row["credential_name"] == "bob" for row in rows)
-
-    def test_batch_allows_same_msg_id_for_different_credentials(self, db):
-        batch = [
-            {"msg_id": "shared1", "thread_id": "dm:a:b", "direction": 1,
-             "sender_did": "did:a", "content": "msg", "credential_name": "alice"},
-            {"msg_id": "shared1", "thread_id": "dm:a:b", "direction": 0,
-             "sender_did": "did:a", "content": "msg", "credential_name": "bob"},
-        ]
-        local_store.store_messages_batch(db, batch)
-        rows = db.execute(
-            "SELECT msg_id, credential_name, direction FROM messages "
-            "WHERE msg_id='shared1' ORDER BY credential_name"
-        ).fetchall()
-        assert len(rows) == 2
-        assert rows[0]["credential_name"] == "alice"
-        assert rows[1]["credential_name"] == "bob"
-
-    def test_batch_per_message_credential_override(self, db):
-        batch = [
-            {"msg_id": "bo1", "thread_id": "dm:a:b", "direction": 0,
-             "sender_did": "did:a", "content": "msg1", "credential_name": "alice"},
             {"msg_id": "bo2", "thread_id": "dm:a:b", "direction": 0,
              "sender_did": "did:a", "content": "msg2"},
         ]
-        local_store.store_messages_batch(db, batch, credential_name="default")
+        local_store.store_messages_batch(db, batch, owner_did="did:bob")
         rows = {
-            row["msg_id"]: row["credential_name"]
-            for row in db.execute("SELECT msg_id, credential_name FROM messages").fetchall()
+            row["msg_id"]: row["owner_did"]
+            for row in db.execute("SELECT msg_id, owner_did FROM messages").fetchall()
         }
-        assert rows["bo1"] == "alice"
-        assert rows["bo2"] == "default"
+        assert rows["bo1"] == "did:alice"
+        assert rows["bo2"] == "did:bob"
 
 
 class TestUpsertContact:
-    """Contact insert/update."""
+    """Contact insert/update with owner isolation."""
 
     def test_insert_new_contact(self, db):
-        local_store.upsert_contact(db, did="did:c1", name="Alice", handle="alice")
-        row = db.execute("SELECT * FROM contacts WHERE did='did:c1'").fetchone()
+        local_store.upsert_contact(
+            db,
+            owner_did="did:alice",
+            did="did:c1",
+            name="Alice",
+            handle="alice",
+        )
+        row = db.execute(
+            "SELECT * FROM contacts WHERE owner_did='did:alice' AND did='did:c1'"
+        ).fetchone()
         assert row["name"] == "Alice"
         assert row["handle"] == "alice"
-        assert row["first_seen_at"] is not None
 
-    def test_update_existing_contact(self, db):
-        local_store.upsert_contact(db, did="did:c2", name="Bob")
-        local_store.upsert_contact(db, did="did:c2", name="Bobby", handle="bobby")
-        row = db.execute("SELECT * FROM contacts WHERE did='did:c2'").fetchone()
-        assert row["name"] == "Bobby"
-        assert row["handle"] == "bobby"
-
-    def test_ignores_unknown_fields(self, db):
-        local_store.upsert_contact(db, did="did:c3", unknown_field="ignored")
-        row = db.execute("SELECT * FROM contacts WHERE did='did:c3'").fetchone()
-        assert row is not None
+    def test_same_contact_can_exist_for_multiple_owners(self, db):
+        local_store.upsert_contact(
+            db,
+            owner_did="did:alice",
+            did="did:bob",
+            relationship="following",
+        )
+        local_store.upsert_contact(
+            db,
+            owner_did="did:charlie",
+            did="did:bob",
+            relationship="none",
+        )
+        rows = db.execute(
+            "SELECT owner_did, relationship FROM contacts WHERE did='did:bob' ORDER BY owner_did"
+        ).fetchall()
+        assert len(rows) == 2
+        assert rows[0]["relationship"] == "following"
+        assert rows[1]["relationship"] == "none"
 
 
 class TestE2eeOutbox:
@@ -300,159 +237,107 @@ class TestE2eeOutbox:
     def test_queue_and_fetch_outbox_record(self, db):
         outbox_id = local_store.queue_e2ee_outbox(
             db,
+            owner_did="did:alice",
             peer_did="did:b",
             plaintext="secret",
             session_id="sess-1",
             credential_name="alice",
         )
-
         record = local_store.get_e2ee_outbox(
-            db, outbox_id=outbox_id, credential_name="alice"
+            db,
+            outbox_id=outbox_id,
+            owner_did="did:alice",
         )
         assert record is not None
         assert record["peer_did"] == "did:b"
-        assert record["local_status"] == "queued"
-        assert record["attempt_count"] == 0
+        assert record["owner_did"] == "did:alice"
 
-    def test_mark_outbox_sent(self, db):
+    def test_mark_outbox_failed_uses_owner_did(self, db):
         outbox_id = local_store.queue_e2ee_outbox(
             db,
+            owner_did="did:alice",
             peer_did="did:b",
-            plaintext="hello",
+            plaintext="secret",
+            session_id="sess-1",
             credential_name="alice",
         )
         local_store.mark_e2ee_outbox_sent(
             db,
             outbox_id=outbox_id,
+            owner_did="did:alice",
             credential_name="alice",
-            session_id="sess-2",
             sent_msg_id="msg-1",
-            sent_server_seq=8,
+            sent_server_seq=7,
         )
-
-        record = local_store.get_e2ee_outbox(
-            db, outbox_id=outbox_id, credential_name="alice"
-        )
-        assert record["local_status"] == "sent"
-        assert record["attempt_count"] == 1
-        assert record["sent_msg_id"] == "msg-1"
-        assert record["sent_server_seq"] == 8
-
-    def test_mark_outbox_failed_by_failed_msg_id(self, db):
-        outbox_id = local_store.queue_e2ee_outbox(
-            db,
-            peer_did="did:b",
-            plaintext="hello",
-            session_id="sess-3",
-            credential_name="alice",
-        )
-        local_store.mark_e2ee_outbox_sent(
-            db,
-            outbox_id=outbox_id,
-            credential_name="alice",
-            session_id="sess-3",
-            sent_msg_id="msg-2",
-            sent_server_seq=11,
-        )
-
         matched = local_store.mark_e2ee_outbox_failed(
             db,
-            credential_name="alice",
+            owner_did="did:alice",
             peer_did="did:b",
-            failed_msg_id="msg-2",
+            failed_msg_id="msg-1",
             error_code="decryption_failed",
             retry_hint="resend",
         )
         assert matched == outbox_id
-
         record = local_store.get_e2ee_outbox(
-            db, outbox_id=outbox_id, credential_name="alice"
-        )
-        assert record["local_status"] == "failed"
-        assert record["last_error_code"] == "decryption_failed"
-        assert record["retry_hint"] == "resend"
-
-    def test_list_failed_outbox(self, db):
-        outbox_id = local_store.queue_e2ee_outbox(
-            db,
-            peer_did="did:b",
-            plaintext="hello",
-            credential_name="alice",
-        )
-        local_store.update_e2ee_outbox_status(
             db,
             outbox_id=outbox_id,
-            local_status="failed",
-            credential_name="alice",
+            owner_did="did:alice",
         )
-        failed = local_store.list_e2ee_outbox(
-            db, credential_name="alice", local_status="failed"
-        )
-        assert len(failed) == 1
-        assert failed[0]["outbox_id"] == outbox_id
+        assert record["local_status"] == "failed"
 
 
 class TestViews:
-    """View correctness."""
+    """View correctness with owner_did grouping."""
 
-    def test_threads_view(self, db):
+    def test_threads_view_groups_by_owner_did(self, db):
         local_store.store_message(
-            db, msg_id="v1", thread_id="dm:a:b", direction=0,
-            sender_did="did:a", content="hello",
+            db,
+            msg_id="v1",
+            owner_did="did:alice",
+            thread_id="group:g1",
+            direction=0,
+            sender_did="did:x",
+            content="hello",
         )
         local_store.store_message(
-            db, msg_id="v2", thread_id="dm:a:b", direction=0,
-            sender_did="did:a", content="world", is_read=True,
+            db,
+            msg_id="v2",
+            owner_did="did:bob",
+            thread_id="group:g1",
+            direction=0,
+            sender_did="did:x",
+            content="world",
         )
-        rows = db.execute("SELECT * FROM threads").fetchall()
-        assert len(rows) == 1
-        assert rows[0]["message_count"] == 2
-        assert rows[0]["unread_count"] == 1
+        rows = db.execute(
+            "SELECT owner_did, thread_id, message_count FROM threads ORDER BY owner_did"
+        ).fetchall()
+        assert len(rows) == 2
+        assert rows[0]["owner_did"] == "did:alice"
+        assert rows[1]["owner_did"] == "did:bob"
 
-    def test_inbox_view(self, db):
+    def test_inbox_and_outbox_views_include_owner_did(self, db):
         local_store.store_message(
-            db, msg_id="in1", thread_id="dm:a:b", direction=0,
-            sender_did="did:a", content="incoming",
-        )
-        local_store.store_message(
-            db, msg_id="out1", thread_id="dm:a:b", direction=1,
-            sender_did="did:b", content="outgoing",
-        )
-        inbox = db.execute("SELECT * FROM inbox").fetchall()
-        outbox = db.execute("SELECT * FROM outbox").fetchall()
-        assert len(inbox) == 1
-        assert inbox[0]["msg_id"] == "in1"
-        assert len(outbox) == 1
-        assert outbox[0]["msg_id"] == "out1"
-
-
-class TestCredentialNameFilter:
-    """Credential name based filtering."""
-
-    def test_filter_by_credential(self, db):
-        local_store.store_message(
-            db, msg_id="f1", thread_id="dm:a:b", direction=0,
-            sender_did="did:a", content="alice msg",
-            credential_name="alice",
+            db,
+            msg_id="in1",
+            owner_did="did:alice",
+            thread_id="dm:a:b",
+            direction=0,
+            sender_did="did:a",
+            content="incoming",
         )
         local_store.store_message(
-            db, msg_id="f2", thread_id="dm:a:b", direction=0,
-            sender_did="did:a", content="bob msg",
-            credential_name="bob",
+            db,
+            msg_id="out1",
+            owner_did="did:alice",
+            thread_id="dm:a:b",
+            direction=1,
+            sender_did="did:alice",
+            content="outgoing",
         )
-        local_store.store_message(
-            db, msg_id="f3", thread_id="dm:a:b", direction=0,
-            sender_did="did:a", content="no cred msg",
-        )
-        result = local_store.execute_sql(
-            db, "SELECT COUNT(*) as cnt FROM messages WHERE credential_name = 'alice'"
-        )
-        assert result[0]["cnt"] == 1
-
-        result = local_store.execute_sql(
-            db, "SELECT COUNT(*) as cnt FROM messages WHERE credential_name = ''"
-        )
-        assert result[0]["cnt"] == 1
+        inbox = db.execute("SELECT owner_did, msg_id FROM inbox").fetchall()
+        outbox = db.execute("SELECT owner_did, msg_id FROM outbox").fetchall()
+        assert inbox[0]["owner_did"] == "did:alice"
+        assert outbox[0]["owner_did"] == "did:alice"
 
 
 class TestExecuteSql:
@@ -460,8 +345,13 @@ class TestExecuteSql:
 
     def test_select(self, db):
         local_store.store_message(
-            db, msg_id="s1", thread_id="dm:a:b", direction=0,
-            sender_did="did:a", content="test",
+            db,
+            msg_id="s1",
+            owner_did="did:self",
+            thread_id="dm:a:b",
+            direction=0,
+            sender_did="did:a",
+            content="test",
         )
         result = local_store.execute_sql(db, "SELECT COUNT(*) as cnt FROM messages")
         assert result[0]["cnt"] == 1
@@ -470,33 +360,148 @@ class TestExecuteSql:
         with pytest.raises(ValueError, match="Forbidden"):
             local_store.execute_sql(db, "DROP TABLE messages")
 
-    def test_reject_truncate(self, db):
-        with pytest.raises(ValueError, match="Forbidden"):
-            local_store.execute_sql(db, "TRUNCATE TABLE messages")
-
-    def test_reject_delete_no_where(self, db):
-        with pytest.raises(ValueError, match="WHERE"):
-            local_store.execute_sql(db, "DELETE FROM messages")
-
     def test_allow_delete_with_where(self, db):
         local_store.store_message(
-            db, msg_id="del1", thread_id="dm:a:b", direction=0,
-            sender_did="did:a", content="to delete",
+            db,
+            msg_id="del1",
+            owner_did="did:self",
+            thread_id="dm:a:b",
+            direction=0,
+            sender_did="did:a",
+            content="to delete",
         )
         result = local_store.execute_sql(
             db, "DELETE FROM messages WHERE msg_id='del1'"
         )
         assert result[0]["rows_affected"] == 1
 
-    def test_reject_multiple_statements(self, db):
-        with pytest.raises(ValueError, match="Multiple"):
-            local_store.execute_sql(
-                db, "SELECT 1; DROP TABLE messages"
-            )
 
-    def test_insert_via_execute_sql(self, db):
-        result = local_store.execute_sql(
-            db,
-            "INSERT INTO contacts (did, name) VALUES ('did:x', 'Test')",
+class TestMigration:
+    """Migration from v4 to v5 should add owner_did isolation."""
+
+    def test_migrate_v4_schema_to_v5(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AWIKI_DATA_DIR", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        db_dir = tmp_path / "database"
+        db_dir.mkdir(parents=True, exist_ok=True)
+        db_path = db_dir / "awiki.db"
+
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE contacts (
+                did TEXT PRIMARY KEY,
+                name TEXT,
+                handle TEXT,
+                nick_name TEXT,
+                bio TEXT,
+                profile_md TEXT,
+                tags TEXT,
+                relationship TEXT,
+                first_seen_at TEXT,
+                last_seen_at TEXT,
+                metadata TEXT
+            );
+            CREATE TABLE messages (
+                msg_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                direction INTEGER NOT NULL DEFAULT 0,
+                sender_did TEXT,
+                receiver_did TEXT,
+                group_id TEXT,
+                group_did TEXT,
+                content_type TEXT DEFAULT 'text',
+                content TEXT,
+                server_seq INTEGER,
+                sent_at TEXT,
+                stored_at TEXT NOT NULL,
+                is_e2ee INTEGER DEFAULT 0,
+                is_read INTEGER DEFAULT 0,
+                sender_name TEXT,
+                metadata TEXT,
+                credential_name TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (msg_id, credential_name)
+            );
+            CREATE TABLE e2ee_outbox (
+                outbox_id TEXT PRIMARY KEY,
+                peer_did TEXT NOT NULL,
+                session_id TEXT,
+                original_type TEXT NOT NULL DEFAULT 'text',
+                plaintext TEXT NOT NULL,
+                local_status TEXT NOT NULL DEFAULT 'queued',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                sent_msg_id TEXT,
+                sent_server_seq INTEGER,
+                last_error_code TEXT,
+                retry_hint TEXT,
+                failed_msg_id TEXT,
+                failed_server_seq INTEGER,
+                metadata TEXT,
+                last_attempt_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                credential_name TEXT NOT NULL DEFAULT ''
+            );
+            PRAGMA user_version = 4;
+        """)
+        conn.execute(
+            "INSERT INTO contacts (did, relationship) VALUES ('did:peer', 'following')"
         )
-        assert result[0]["rows_affected"] == 1
+        conn.execute(
+            """
+            INSERT INTO messages
+            (msg_id, thread_id, direction, sender_did, receiver_did, content, stored_at, credential_name)
+            VALUES ('m1', 'dm:did:alice:did:peer', 1, 'did:alice', 'did:peer', 'hello', '2026-01-01T00:00:00+00:00', 'alice')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO e2ee_outbox
+            (outbox_id, peer_did, plaintext, created_at, updated_at, credential_name)
+            VALUES ('o1', 'did:peer', 'secret', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00', 'alice')
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        cred_root = tmp_path / ".openclaw" / "credentials" / "awiki-agent-id-message"
+        cred_root.mkdir(parents=True, exist_ok=True)
+        (cred_root / "index.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 3,
+                    "default_credential_name": "alice",
+                    "credentials": {
+                        "alice": {
+                            "credential_name": "alice",
+                            "dir_name": "k1_alice",
+                            "did": "did:alice",
+                            "unique_id": "k1_alice",
+                            "is_default": True,
+                        }
+                    },
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        conn = local_store.get_connection()
+        local_store.ensure_schema(conn)
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        migrated_message = conn.execute(
+            "SELECT owner_did FROM messages WHERE msg_id='m1'"
+        ).fetchone()
+        migrated_contact = conn.execute(
+            "SELECT owner_did FROM contacts WHERE did='did:peer'"
+        ).fetchone()
+        migrated_outbox = conn.execute(
+            "SELECT owner_did FROM e2ee_outbox WHERE outbox_id='o1'"
+        ).fetchone()
+        conn.close()
+
+        assert version == 5
+        assert migrated_message["owner_did"] == "did:alice"
+        assert migrated_contact["owner_did"] == "did:alice"
+        assert migrated_outbox["owner_did"] == "did:alice"

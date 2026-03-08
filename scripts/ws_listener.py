@@ -411,6 +411,7 @@ async def listen_loop(
                                 local_store.store_message,
                                 local_db,
                                 msg_id=params.get("id", ""),
+                                owner_did=my_did,
                                 thread_id=local_store.make_thread_id(
                                     my_did,
                                     peer_did=sender_did,
@@ -434,6 +435,7 @@ async def listen_loop(
                                 await asyncio.to_thread(
                                     local_store.upsert_contact,
                                     local_db,
+                                    owner_did=my_did,
                                     did=sender_did,
                                     name=params.get("sender_name"),
                                 )

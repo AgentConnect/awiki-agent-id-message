@@ -81,6 +81,7 @@ async def send_message(
             local_store.store_message(
                 conn,
                 msg_id=result.get("id", str(uuid.uuid4())),
+                owner_did=data["did"],
                 thread_id=local_store.make_thread_id(
                     data["did"], peer_did=receiver_did,
                 ),
@@ -97,7 +98,12 @@ async def send_message(
             contact_fields = {}
             if receiver != receiver_did:
                 contact_fields["handle"] = receiver
-            local_store.upsert_contact(conn, did=receiver_did, **contact_fields)
+            local_store.upsert_contact(
+                conn,
+                owner_did=data["did"],
+                did=receiver_did,
+                **contact_fields,
+            )
             conn.close()
         except Exception:
             logger.debug("Failed to persist sent message locally", exc_info=True)
