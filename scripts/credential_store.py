@@ -1,4 +1,4 @@
-"""Credential persistence: save/load private keys, DID, JWT to local files.
+"""Credential persistence: save/load private keys, DID, JWT, and Handle to local files.
 
 [INPUT]: DIDIdentity object, DIDWbaAuthHeader (ANP SDK), SDKConfig (credentials_dir)
 [OUTPUT]: save_identity(), load_identity(), list_identities(), delete_identity(),
@@ -52,6 +52,7 @@ def save_identity(
     public_key_pem: bytes,
     jwt_token: str | None = None,
     display_name: str | None = None,
+    handle: str | None = None,
     name: str = "default",
     did_document: dict[str, Any] | None = None,
     e2ee_signing_private_pem: bytes | None = None,
@@ -67,6 +68,7 @@ def save_identity(
         public_key_pem: PEM-encoded public key
         jwt_token: JWT token
         display_name: Display name
+        handle: Registered Handle local-part, if available
         name: Credential name (default "default")
         did_document: DID document (for DIDWbaAuthHeader)
         e2ee_signing_private_pem: key-2 secp256r1 signing private key PEM
@@ -88,6 +90,8 @@ def save_identity(
         "did_document": did_document,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if handle is not None:
+        credential_data["handle"] = handle
 
     if e2ee_signing_private_pem is not None:
         credential_data["e2ee_signing_private_pem"] = (
@@ -106,7 +110,13 @@ def save_identity(
     path.write_text(json.dumps(credential_data, indent=2, ensure_ascii=False))
     # Set private key file permissions to 600 (only current user can read/write)
     os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
-    logger.info("Saved credential name=%s did=%s path=%s", name, did, path)
+    logger.info(
+        "Saved credential name=%s did=%s handle=%s path=%s",
+        name,
+        did,
+        handle,
+        path,
+    )
     return path
 
 
@@ -145,6 +155,7 @@ def list_identities() -> list[dict[str, Any]]:
                 "did": data.get("did", ""),
                 "unique_id": data.get("unique_id", ""),
                 "name": data.get("name", ""),
+                "handle": data.get("handle", ""),
                 "user_id": data.get("user_id", ""),
                 "created_at": data.get("created_at", ""),
                 "has_jwt": bool(data.get("jwt_token")),

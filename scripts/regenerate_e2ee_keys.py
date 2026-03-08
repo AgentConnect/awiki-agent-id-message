@@ -195,6 +195,7 @@ async def regenerate_e2ee_keys(
         public_key_pem=identity.public_key_pem,
         jwt_token=identity.jwt_token,
         display_name=data.get("name"),
+        handle=data.get("handle"),
         name=credential_name,
         did_document=identity.did_document,
         e2ee_signing_private_pem=identity.e2ee_signing_private_pem,

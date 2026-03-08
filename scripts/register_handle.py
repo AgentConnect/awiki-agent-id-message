@@ -91,6 +91,7 @@ async def do_register(
             public_key_pem=identity.public_key_pem,
             jwt_token=identity.jwt_token,
             display_name=name or handle,
+            handle=handle,
             name=credential_name,
             did_document=identity.did_document,
             e2ee_signing_private_pem=identity.e2ee_signing_private_pem,
