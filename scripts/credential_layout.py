@@ -26,7 +26,7 @@ from utils.config import SDKConfig
 
 logger = logging.getLogger(__name__)
 
-INDEX_SCHEMA_VERSION = 2
+INDEX_SCHEMA_VERSION = 3
 INDEX_FILE_NAME = "index.json"
 LEGACY_BACKUP_DIR_NAME = ".legacy-backup"
 IDENTITY_FILE_NAME = "identity.json"
@@ -92,7 +92,34 @@ def _default_index() -> dict[str, Any]:
     """Return an empty credential index payload."""
     return {
         "schema_version": INDEX_SCHEMA_VERSION,
+        "default_credential_name": None,
         "credentials": {},
+    }
+
+
+def _normalize_index_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Normalize older index payloads into the current schema shape."""
+    credentials = data.get("credentials")
+    if not isinstance(credentials, dict):
+        raise ValueError("Credential index 'credentials' must be a dict")
+
+    default_credential_name = data.get("default_credential_name")
+    if default_credential_name is None and "default" in credentials:
+        default_credential_name = "default"
+
+    normalized_credentials: dict[str, Any] = {}
+    for credential_name, entry in credentials.items():
+        if not isinstance(entry, dict):
+            raise ValueError(f"Credential index entry must be a dict: {credential_name}")
+        normalized_entry = dict(entry)
+        normalized_entry["credential_name"] = credential_name
+        normalized_entry["is_default"] = credential_name == default_credential_name
+        normalized_credentials[credential_name] = normalized_entry
+
+    return {
+        "schema_version": INDEX_SCHEMA_VERSION,
+        "default_credential_name": default_credential_name,
+        "credentials": normalized_credentials,
     }
 
 
@@ -103,21 +130,17 @@ def load_index(config: SDKConfig | None = None) -> dict[str, Any]:
         return _default_index()
 
     data = json.loads(path.read_text(encoding="utf-8"))
-    if data.get("schema_version") != INDEX_SCHEMA_VERSION:
+    schema_version = data.get("schema_version")
+    if schema_version not in (2, 3):
         raise ValueError(
-            f"Unsupported credential index schema: {data.get('schema_version')}"
+            f"Unsupported credential index schema: {schema_version}"
         )
-    credentials = data.get("credentials")
-    if not isinstance(credentials, dict):
-        raise ValueError("Credential index 'credentials' must be a dict")
-    return data
+    return _normalize_index_payload(data)
 
 
 def save_index(index: dict[str, Any], config: SDKConfig | None = None) -> Path:
     """Persist the credential index with secure permissions."""
-    payload = dict(index)
-    payload["schema_version"] = INDEX_SCHEMA_VERSION
-    payload.setdefault("credentials", {})
+    payload = _normalize_index_payload(dict(index))
     path = index_path(config)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
@@ -141,6 +164,10 @@ def set_index_entry(
     """Upsert a credential index entry."""
     index = load_index(config)
     index["credentials"][credential_name] = entry
+    if entry.get("is_default"):
+        index["default_credential_name"] = credential_name
+    elif index.get("default_credential_name") == credential_name:
+        index["default_credential_name"] = None
     return save_index(index, config)
 
 
@@ -153,6 +180,8 @@ def remove_index_entry(
     if credential_name not in index["credentials"]:
         return False
     del index["credentials"][credential_name]
+    if index.get("default_credential_name") == credential_name:
+        index["default_credential_name"] = None
     save_index(index, config)
     return True
 
@@ -170,11 +199,14 @@ def preferred_credential_dir_name(
     handle: str | None,
     unique_id: str,
 ) -> str:
-    """Select the preferred credential directory name."""
-    preferred_value = handle or unique_id
-    if not preferred_value:
-        raise ValueError("Credential directory name requires either handle or unique_id")
-    return sanitize_credential_dir_name(preferred_value)
+    """Select the preferred credential directory name.
+
+    The credential directory name is always derived from the DID unique_id so
+    it remains stable even if the Handle changes or is removed later.
+    """
+    if not unique_id:
+        raise ValueError("Credential directory name requires unique_id")
+    return sanitize_credential_dir_name(unique_id)
 
 
 def build_credential_paths(

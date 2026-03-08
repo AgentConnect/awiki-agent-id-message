@@ -93,20 +93,23 @@ def _write_legacy_credential(
     (root / f"{credential_name}_private_key.pem").write_text("legacy-private", encoding="utf-8")
 
 
-def test_save_identity_with_handle_creates_handle_named_directory(isolated_home) -> None:
-    """Handle-registered credentials should use the handle as the directory name."""
-    path = _save_sample_identity(handle="alice")
+def test_save_identity_with_handle_uses_unique_id_directory_and_indexes_handle(isolated_home) -> None:
+    """Handle-registered credentials should still use unique_id as directory name."""
+    path = _save_sample_identity(handle="alice", unique_id="k1_test")
     root = _credentials_root(isolated_home)
     index = json.loads((root / "index.json").read_text(encoding="utf-8"))
     loaded_data = credential_store.load_identity("default")
 
-    assert path == root / "alice" / "identity.json"
-    assert index["credentials"]["default"]["dir_name"] == "alice"
+    assert path == root / "k1_test" / "identity.json"
+    assert index["default_credential_name"] == "default"
+    assert index["credentials"]["default"]["dir_name"] == "k1_test"
+    assert index["credentials"]["default"]["handle"] == "alice"
+    assert index["credentials"]["default"]["is_default"] is True
     assert loaded_data is not None
     assert loaded_data["handle"] == "alice"
     assert loaded_data["private_key_pem"] == "private-key"
-    assert (root / "alice" / "key-1-private.pem").exists()
-    assert (root / "alice" / "did_document.json").exists()
+    assert (root / "k1_test" / "key-1-private.pem").exists()
+    assert (root / "k1_test" / "did_document.json").exists()
 
 
 def test_save_identity_without_handle_uses_unique_id_directory(isolated_home) -> None:
@@ -134,12 +137,12 @@ def test_save_identity_rejects_overwrite_for_different_did(isolated_home) -> Non
 
 def test_e2ee_state_is_stored_inside_credential_directory(isolated_home) -> None:
     """E2EE state should be saved in the credential's own directory."""
-    _save_sample_identity(handle="alice")
+    _save_sample_identity(handle="alice", unique_id="k1_test")
 
     state_path = e2ee_store.save_e2ee_state({"local_did": "did:wba:awiki.ai:alice:k1_test"}, "default")
     loaded_state = e2ee_store.load_e2ee_state("default")
 
-    assert state_path == _credentials_root(isolated_home) / "alice" / "e2ee-state.json"
+    assert state_path == _credentials_root(isolated_home) / "k1_test" / "e2ee-state.json"
     assert loaded_state == {"local_did": "did:wba:awiki.ai:alice:k1_test"}
 
 
@@ -155,6 +158,7 @@ def test_migrate_legacy_credentials_creates_new_layout_and_backup(isolated_home)
 
     assert result["status"] == "migrated"
     assert result["migrated"][0]["credential_name"] == "default"
+    assert result["migrated"][0]["dir_name"] == "k1_legacy"
     assert loaded_data is not None
     assert loaded_data["did"] == "did:wba:awiki.ai:alice:k1_legacy"
     assert migrated_state == {
@@ -266,3 +270,52 @@ def test_list_identities_reads_from_index(isolated_home) -> None:
 
     assert [identity["credential_name"] for identity in identities] == ["backup", "default"]
     assert identities[1]["handle"] == "alice"
+    assert identities[1]["is_default"] is True
+    assert identities[1]["dir_name"] == "k1_test"
+
+
+def test_multiple_credential_names_can_reference_same_unique_id_directory(isolated_home) -> None:
+    """Different credential names for the same DID should share the unique_id directory."""
+    _save_sample_identity(
+        handle="alice",
+        name="default",
+        did="did:wba:awiki.ai:alice:k1_same",
+        unique_id="k1_same",
+    )
+    path = _save_sample_identity(
+        handle="alice",
+        name="alice_alias",
+        did="did:wba:awiki.ai:alice:k1_same",
+        unique_id="k1_same",
+    )
+
+    root = _credentials_root(isolated_home)
+    index = json.loads((root / "index.json").read_text(encoding="utf-8"))
+
+    assert path == root / "k1_same" / "identity.json"
+    assert index["credentials"]["default"]["dir_name"] == "k1_same"
+    assert index["credentials"]["alice_alias"]["dir_name"] == "k1_same"
+
+
+def test_delete_identity_keeps_shared_directory_until_last_reference(isolated_home) -> None:
+    """Deleting one alias should not remove a shared unique_id directory too early."""
+    _save_sample_identity(
+        handle="alice",
+        name="default",
+        did="did:wba:awiki.ai:alice:k1_same",
+        unique_id="k1_same",
+    )
+    _save_sample_identity(
+        handle="alice",
+        name="alice_alias",
+        did="did:wba:awiki.ai:alice:k1_same",
+        unique_id="k1_same",
+    )
+
+    root = _credentials_root(isolated_home)
+    credential_dir = root / "k1_same"
+
+    assert credential_store.delete_identity("alice_alias") is True
+    assert credential_dir.exists()
+    assert credential_store.delete_identity("default") is True
+    assert not credential_dir.exists()

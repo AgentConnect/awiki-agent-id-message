@@ -82,6 +82,7 @@ def _build_index_entry(
         "name": display_name,
         "handle": handle,
         "created_at": created_at,
+        "is_default": credential_name == "default",
     }
 
 
@@ -99,6 +100,8 @@ def _validate_target_directory(
     }
     for existing_name, entry in index_credentials.items():
         if entry["dir_name"] == dir_name:
+            if entry.get("did") == did:
+                continue
             raise ValueError(
                 f"Credential directory '{dir_name}' is already used by "
                 f"credential '{existing_name}' ({entry.get('did')})"
@@ -106,10 +109,24 @@ def _validate_target_directory(
 
     paths = build_credential_paths(dir_name)
     if paths.credential_dir.exists() and any(paths.credential_dir.iterdir()):
+        if any(
+            entry.get("dir_name") == dir_name and entry.get("did") == did
+            for entry in index_credentials.values()
+        ):
+            return
         raise ValueError(
             f"Credential directory '{dir_name}' already exists but is not indexed; "
             f"refusing to overwrite for DID {did}"
         )
+
+
+def _credential_reference_count(dir_name: str) -> int:
+    """Count how many credential names reference the same directory."""
+    return sum(
+        1
+        for entry in list_identities_by_name().values()
+        if entry.get("dir_name") == dir_name
+    )
 
 
 def list_identities_by_name() -> dict[str, dict[str, Any]]:
@@ -134,6 +151,7 @@ def save_identity(
     e2ee_agreement_private_pem: bytes | None = None,
 ) -> Path:
     """Save a DID identity into the indexed multi-credential layout."""
+    dir_name = preferred_credential_dir_name(handle=handle, unique_id=unique_id)
     existing_entry = get_index_entry(name)
     if existing_entry is not None:
         if existing_entry.get("did") != did:
@@ -143,7 +161,6 @@ def save_identity(
             )
         dir_name = existing_entry["dir_name"]
     else:
-        dir_name = preferred_credential_dir_name(handle=handle, unique_id=unique_id)
         _validate_target_directory(name, dir_name=dir_name, did=did)
 
     paths = build_credential_paths(dir_name)
@@ -264,6 +281,7 @@ def list_identities() -> list[dict[str, Any]]:
 
     identities = []
     for credential_name, entry in sorted(list_identities_by_name().items()):
+        paths = resolve_credential_paths(credential_name)
         identities.append({
             "credential_name": credential_name,
             "did": entry.get("did", ""),
@@ -272,7 +290,9 @@ def list_identities() -> list[dict[str, Any]]:
             "handle": entry.get("handle", ""),
             "user_id": entry.get("user_id", ""),
             "created_at": entry.get("created_at", ""),
-            "has_jwt": bool((_read_json_if_exists(resolve_credential_paths(credential_name).auth_path) or {}).get("jwt_token")),
+            "is_default": bool(entry.get("is_default")),
+            "dir_name": entry.get("dir_name", ""),
+            "has_jwt": bool((_read_json_if_exists(paths.auth_path) or {}).get("jwt_token")) if paths is not None else False,
         })
 
     logger.debug("Listed %d credentials", len(identities))
@@ -287,11 +307,17 @@ def delete_identity(name: str) -> bool:
             logger.error("%s", legacy_layout_hint())
         return False
 
-    if paths.credential_dir.exists():
+    reference_count = _credential_reference_count(paths.dir_name)
+    if paths.credential_dir.exists() and reference_count <= 1:
         shutil.rmtree(paths.credential_dir)
     removed = remove_index_entry(name)
     if removed:
-        logger.info("Deleted credential name=%s dir=%s", name, paths.credential_dir)
+        logger.info(
+            "Deleted credential name=%s dir=%s shared_dir_references_before_delete=%d",
+            name,
+            paths.credential_dir,
+            reference_count,
+        )
     return removed
 
 
