@@ -135,6 +135,45 @@ def test_save_identity_rejects_overwrite_for_different_did(isolated_home) -> Non
         )
 
 
+def test_save_identity_allows_replace_existing_when_requested(isolated_home) -> None:
+    """Recovery flows should be able to replace the DID for one credential name."""
+    _save_sample_identity(
+        name="default",
+        did="did:wba:awiki.ai:user:k1_first",
+        unique_id="k1_first",
+    )
+
+    path = credential_store.save_identity(
+        did="did:wba:awiki.ai:alice:k1_second",
+        unique_id="k1_second",
+        user_id="user-2",
+        private_key_pem=b"private-key-2",
+        public_key_pem=b"public-key-2",
+        jwt_token="jwt-token-2",
+        display_name="Recovered User",
+        handle="alice",
+        name="default",
+        did_document={"id": "did:wba:awiki.ai:alice:k1_second"},
+        replace_existing=True,
+    )
+
+    loaded_data = credential_store.load_identity("default")
+    assert path == _credentials_root(isolated_home) / "k1_second" / "identity.json"
+    assert loaded_data is not None
+    assert loaded_data["did"] == "did:wba:awiki.ai:alice:k1_second"
+
+
+def test_backup_identity_copies_current_credential_directory(isolated_home) -> None:
+    """Existing credential directories should be backup-able before recovery."""
+    _save_sample_identity(handle="alice", name="default")
+
+    backup_dir = credential_store.backup_identity("default")
+
+    assert backup_dir is not None
+    assert (backup_dir / "k1_test" / "identity.json").exists()
+    assert (backup_dir / "index_entry.json").exists()
+
+
 def test_e2ee_state_is_stored_inside_credential_directory(isolated_home) -> None:
     """E2EE state should be saved in the credential's own directory."""
     _save_sample_identity(handle="alice", unique_id="k1_test")

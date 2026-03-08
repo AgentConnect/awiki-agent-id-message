@@ -975,6 +975,95 @@ def upsert_contact(
     conn.commit()
 
 
+def rebind_owner_did(
+    conn: sqlite3.Connection,
+    *,
+    old_owner_did: str,
+    new_owner_did: str,
+) -> dict[str, int]:
+    """Move messages and contacts from one owner DID to another."""
+    normalized_old_owner_did = _normalize_owner_did(old_owner_did)
+    normalized_new_owner_did = _normalize_owner_did(new_owner_did)
+
+    if (
+        not normalized_old_owner_did
+        or not normalized_new_owner_did
+        or normalized_old_owner_did == normalized_new_owner_did
+    ):
+        return {"messages": 0, "contacts": 0}
+
+    moved_message_count = conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE owner_did = ?",
+        (normalized_old_owner_did,),
+    ).fetchone()[0]
+    moved_contact_count = conn.execute(
+        "SELECT COUNT(*) FROM contacts WHERE owner_did = ?",
+        (normalized_old_owner_did,),
+    ).fetchone()[0]
+
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO messages
+        (msg_id, owner_did, thread_id, direction, sender_did, receiver_did, group_id,
+         group_did, content_type, content, server_seq, sent_at, stored_at, is_e2ee,
+         is_read, sender_name, metadata, credential_name)
+        SELECT msg_id, ?, thread_id, direction, sender_did, receiver_did, group_id,
+               group_did, content_type, content, server_seq, sent_at, stored_at, is_e2ee,
+               is_read, sender_name, metadata, credential_name
+        FROM messages
+        WHERE owner_did = ?
+        """,
+        (normalized_new_owner_did, normalized_old_owner_did),
+    )
+    conn.execute(
+        "DELETE FROM messages WHERE owner_did = ?",
+        (normalized_old_owner_did,),
+    )
+
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO contacts
+        (owner_did, did, name, handle, nick_name, bio, profile_md, tags,
+         relationship, first_seen_at, last_seen_at, metadata)
+        SELECT ?, did, name, handle, nick_name, bio, profile_md, tags,
+               relationship, first_seen_at, last_seen_at, metadata
+        FROM contacts
+        WHERE owner_did = ?
+        """,
+        (normalized_new_owner_did, normalized_old_owner_did),
+    )
+    conn.execute(
+        "DELETE FROM contacts WHERE owner_did = ?",
+        (normalized_old_owner_did,),
+    )
+
+    conn.commit()
+    return {"messages": moved_message_count, "contacts": moved_contact_count}
+
+
+def clear_owner_e2ee_data(
+    conn: sqlite3.Connection,
+    *,
+    owner_did: str,
+    credential_name: str | None = None,
+) -> dict[str, int]:
+    """Delete owner-scoped E2EE outbox data after a DID recovery/reset."""
+    normalized_owner_did = _normalize_owner_did(owner_did)
+    if not normalized_owner_did:
+        return {"e2ee_outbox": 0}
+
+    row_count = conn.execute(
+        "SELECT COUNT(*) FROM e2ee_outbox WHERE owner_did = ?",
+        (normalized_owner_did,),
+    ).fetchone()[0]
+    conn.execute(
+        "DELETE FROM e2ee_outbox WHERE owner_did = ?",
+        (normalized_owner_did,),
+    )
+    conn.commit()
+    return {"e2ee_outbox": row_count}
+
+
 def execute_sql(
     conn: sqlite3.Connection,
     sql: str,
@@ -1015,6 +1104,8 @@ __all__ = [
     "mark_e2ee_outbox_failed",
     "mark_e2ee_outbox_sent",
     "queue_e2ee_outbox",
+    "rebind_owner_did",
+    "clear_owner_e2ee_data",
     "set_e2ee_outbox_failure_by_id",
     "store_message",
     "store_messages_batch",

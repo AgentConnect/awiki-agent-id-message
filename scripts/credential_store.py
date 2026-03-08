@@ -129,6 +129,18 @@ def _credential_reference_count(dir_name: str) -> int:
     )
 
 
+def prune_unreferenced_credential_dir(dir_name: str) -> bool:
+    """Delete a credential directory when it is no longer referenced by the index."""
+    if _credential_reference_count(dir_name) > 0:
+        return False
+    paths = build_credential_paths(dir_name)
+    if not paths.credential_dir.exists():
+        return False
+    shutil.rmtree(paths.credential_dir)
+    logger.info("Pruned unreferenced credential dir=%s", paths.credential_dir)
+    return True
+
+
 def list_identities_by_name() -> dict[str, dict[str, Any]]:
     """Return the raw credential index mapping."""
     from credential_layout import load_index
@@ -149,17 +161,21 @@ def save_identity(
     did_document: dict[str, Any] | None = None,
     e2ee_signing_private_pem: bytes | None = None,
     e2ee_agreement_private_pem: bytes | None = None,
+    replace_existing: bool = False,
 ) -> Path:
     """Save a DID identity into the indexed multi-credential layout."""
     dir_name = preferred_credential_dir_name(handle=handle, unique_id=unique_id)
     existing_entry = get_index_entry(name)
     if existing_entry is not None:
         if existing_entry.get("did") != did:
-            raise ValueError(
-                f"Credential '{name}' already exists for DID {existing_entry.get('did')}; "
-                f"refusing to overwrite with DID {did}"
-            )
-        dir_name = existing_entry["dir_name"]
+            if not replace_existing:
+                raise ValueError(
+                    f"Credential '{name}' already exists for DID {existing_entry.get('did')}; "
+                    f"refusing to overwrite with DID {did}"
+                )
+            _validate_target_directory(name, dir_name=dir_name, did=did)
+        else:
+            dir_name = existing_entry["dir_name"]
     else:
         _validate_target_directory(name, dir_name=dir_name, did=did)
 
@@ -321,6 +337,28 @@ def delete_identity(name: str) -> bool:
     return removed
 
 
+def backup_identity(name: str) -> Path | None:
+    """Backup the current credential directory before destructive changes."""
+    paths = resolve_credential_paths(name)
+    if paths is None or not paths.credential_dir.exists():
+        return None
+
+    backup_root = (
+        paths.root_dir
+        / ".recovery-backup"
+        / name
+        / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    )
+    backup_root.mkdir(parents=True, exist_ok=True)
+    backup_dir = backup_root / paths.dir_name
+    shutil.copytree(paths.credential_dir, backup_dir)
+
+    index_entry = get_index_entry(name) or {}
+    write_secure_json(backup_root / "index_entry.json", index_entry)
+    logger.info("Backed up credential name=%s backup_dir=%s", name, backup_root)
+    return backup_root
+
+
 def update_jwt(name: str, jwt_token: str) -> bool:
     """Update the JWT token of a saved identity."""
     paths = resolve_credential_paths(name)
@@ -392,11 +430,13 @@ def create_authenticator(
 
 
 __all__ = [
+    "backup_identity",
     "create_authenticator",
     "delete_identity",
     "extract_auth_files",
     "list_identities",
     "load_identity",
+    "prune_unreferenced_credential_dir",
     "save_identity",
     "update_jwt",
 ]

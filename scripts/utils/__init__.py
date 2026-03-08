@@ -28,6 +28,7 @@ from utils.rpc import JsonRpcError, rpc_call, authenticated_rpc_call
 from utils.handle import (
     send_otp,
     register_handle,
+    recover_handle,
     resolve_handle,
     lookup_handle,
     normalize_phone,
@@ -67,6 +68,7 @@ __all__ = [
     # handle
     "send_otp",
     "register_handle",
+    "recover_handle",
     "resolve_handle",
     "lookup_handle",
     "normalize_phone",

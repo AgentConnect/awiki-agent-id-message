@@ -205,6 +205,21 @@ cd <SKILL_DIR> && python scripts/resolve_handle.py --did "did:wba:awiki.ai:alice
 - 保留名称（admin、system、user、group 等）不可使用
 - 每个 DID 最多一个 Handle；每个 Handle 精确映射到一个 DID
 
+### 恢复 Handle
+
+如果绑定 Handle 的 DID 私钥丢失，可以用原手机号 + 新 DID 恢复：
+
+```bash
+cd <SKILL_DIR> && python scripts/recover_handle.py --handle alice --phone +8613800138000 --credential default
+```
+
+恢复流程会：
+- 发送或校验短信验证码
+- 为同一个 Handle 创建全新的 DID
+- 在服务端把 Handle 重新绑定到新 DID，同时保留原 `user_id`
+- 先备份本地旧凭证，再写入新凭证
+- 把本地消息/联系人缓存迁移到新 DID，并清理失效的 E2EE 状态
+
 ### 凭证存储
 
 - 身份凭证存储在 `~/.openclaw/credentials/...`

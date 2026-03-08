@@ -230,6 +230,24 @@ class TestUpsertContact:
         assert rows[0]["relationship"] == "following"
         assert rows[1]["relationship"] == "none"
 
+    def test_rebind_owner_did_moves_contacts(self, db):
+        local_store.upsert_contact(
+            db,
+            owner_did="did:old",
+            did="did:bob",
+            relationship="following",
+        )
+        summary = local_store.rebind_owner_did(
+            db,
+            old_owner_did="did:old",
+            new_owner_did="did:new",
+        )
+        row = db.execute(
+            "SELECT owner_did, relationship FROM contacts WHERE did='did:bob'"
+        ).fetchone()
+        assert summary["contacts"] == 1
+        assert row["owner_did"] == "did:new"
+
 
 class TestE2eeOutbox:
     """E2EE outbox persistence and retry status tracking."""
@@ -284,6 +302,27 @@ class TestE2eeOutbox:
             owner_did="did:alice",
         )
         assert record["local_status"] == "failed"
+
+    def test_clear_owner_e2ee_data_removes_outbox_records(self, db):
+        outbox_id = local_store.queue_e2ee_outbox(
+            db,
+            owner_did="did:alice",
+            peer_did="did:b",
+            plaintext="secret",
+            credential_name="alice",
+        )
+        summary = local_store.clear_owner_e2ee_data(
+            db,
+            owner_did="did:alice",
+            credential_name="alice",
+        )
+        record = local_store.get_e2ee_outbox(
+            db,
+            outbox_id=outbox_id,
+            owner_did="did:alice",
+        )
+        assert summary["e2ee_outbox"] == 1
+        assert record is None
 
 
 class TestViews:
@@ -505,3 +544,33 @@ class TestMigration:
         assert migrated_message["owner_did"] == "did:alice"
         assert migrated_contact["owner_did"] == "did:alice"
         assert migrated_outbox["owner_did"] == "did:alice"
+
+    def test_rebind_owner_did_moves_messages_without_duplicate_conflicts(self, db):
+        local_store.store_message(
+            db,
+            msg_id="m1",
+            owner_did="did:old",
+            thread_id="dm:a:b",
+            direction=0,
+            sender_did="did:b",
+            content="old",
+        )
+        local_store.store_message(
+            db,
+            msg_id="m1",
+            owner_did="did:new",
+            thread_id="dm:a:b",
+            direction=0,
+            sender_did="did:b",
+            content="new",
+        )
+        summary = local_store.rebind_owner_did(
+            db,
+            old_owner_did="did:old",
+            new_owner_did="did:new",
+        )
+        count = db.execute(
+            "SELECT COUNT(*) FROM messages WHERE msg_id='m1'"
+        ).fetchone()[0]
+        assert summary["messages"] == 1
+        assert count == 1

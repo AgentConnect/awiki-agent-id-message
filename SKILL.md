@@ -204,6 +204,22 @@ cd <SKILL_DIR> && python scripts/resolve_handle.py --did "did:wba:awiki.ai:alice
 - Reserved names (admin, system, user, group, etc.) are not allowed
 - Each DID can have at most one Handle; each Handle maps to exactly one DID
 
+### Recover a Handle
+
+If the private key for a Handle-bound DID is lost, recover it with the original
+phone number and a new DID:
+
+```bash
+cd <SKILL_DIR> && python scripts/recover_handle.py --handle alice --phone +8613800138000 --credential default
+```
+
+The recovery flow:
+- sends or verifies an OTP
+- creates a brand-new DID for the same Handle
+- rebinds the Handle on the server while keeping the original `user_id`
+- backs up the old local credential before replacing it
+- migrates local message/contact ownership to the new DID and clears stale E2EE state
+
 ### Credential Storage
 
 - Identity credentials are stored in `~/.openclaw/credentials/...`
