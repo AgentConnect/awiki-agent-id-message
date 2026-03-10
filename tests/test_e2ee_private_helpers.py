@@ -237,6 +237,14 @@ class TestInboxSortKey:
         assert messages[0]["sender_did"] is None
         assert messages[1]["sender_did"] == "did:a"
 
+    def test_e2ee_messaging_sender_did_value_uses_placeholder_for_none(self):
+        assert (
+            e2ee_messaging._sender_did_value({"sender_did": None}) == "?"
+        )
+        assert (
+            e2ee_messaging._sender_did_value({"sender_did": "did:a"}) == "did:a"
+        )
+
 
 class TestOutgoingHistoryRender:
     """Outgoing encrypted history items should be replaceable with local plaintext."""

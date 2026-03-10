@@ -73,6 +73,12 @@ def _message_time_value(message: dict[str, Any]) -> str:
     return timestamp if isinstance(timestamp, str) else ""
 
 
+def _sender_did_value(message: dict[str, Any], fallback: str = "?") -> str:
+    """Return a safe sender DID string for logging and user-facing output."""
+    sender_did = message.get("sender_did")
+    return sender_did if isinstance(sender_did, str) and sender_did else fallback
+
+
 def _message_sort_key(message: dict[str, Any]) -> tuple[Any, ...]:
     """Build a stable inbox ordering key with server_seq priority inside a sender stream."""
     sender_did_raw = message.get("sender_did")
@@ -336,7 +342,7 @@ async def process_inbox(
 
         for msg in messages:
             msg_type = msg["type"]
-            sender_did = msg.get("sender_did", "?")
+            sender_did = _sender_did_value(msg)
             processed_ok = False
 
             if msg_type in _E2EE_MSG_TYPES:
