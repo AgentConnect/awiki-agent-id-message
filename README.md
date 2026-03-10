@@ -164,9 +164,19 @@ python3 scripts/manage_group.py --get --group-id GROUP_ID
 python3 scripts/manage_group.py --members --group-id GROUP_ID
 python3 scripts/manage_group.py --list-messages --group-id GROUP_ID
 
-# Fetch one member's public profile (member rows expose handle / DID, not profile_url)
+# Inspect local member snapshots (member rows now expose handle / DID / profile_url)
+python3 scripts/query_db.py "SELECT member_handle, member_did, profile_url, role FROM group_members WHERE owner_did='did:me' AND group_id='grp_xxx' ORDER BY role, member_handle"
+
+# Fetch one member's public profile
 python3 scripts/get_profile.py --handle alice
 python3 scripts/get_profile.py --did "did:wba:awiki.ai:user:alice"
+
+# Inspect structured group system events saved in local message metadata
+python3 scripts/query_db.py "SELECT msg_id, content_type, content, metadata FROM messages WHERE owner_did='did:me' AND group_id='grp_xxx' AND content_type IN ('group_system_member_joined', 'group_system_member_left', 'group_system_member_kicked') ORDER BY server_seq"
+
+# Record recommendation / confirmation after explicit user approval
+python3 scripts/manage_contacts.py --record-recommendation --target-did "did:wba:awiki.ai:user:bob" --target-handle "bob.awiki.ai" --source-type meetup --source-name "OpenClaw Meetup Hangzhou 2026" --source-group-id grp_xxx --reason "Strong protocol fit"
+python3 scripts/manage_contacts.py --save-from-group --target-did "did:wba:awiki.ai:user:bob" --target-handle "bob.awiki.ai" --source-type meetup --source-name "OpenClaw Meetup Hangzhou 2026" --source-group-id grp_xxx --reason "Strong protocol fit"
 
 # Post a group message
 python3 scripts/manage_group.py --post-message --group-id GROUP_ID --content "Hello everyone"

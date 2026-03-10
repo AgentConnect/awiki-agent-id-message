@@ -561,12 +561,52 @@ cd <SKILL_DIR> && python scripts/manage_group.py --join --passcode 314159
 cd <SKILL_DIR> && python scripts/manage_group.py --members --group-id GID
 cd <SKILL_DIR> && python scripts/manage_group.py --list-messages --group-id GID
 
+# 查看本地成员快照（成员列表返回 handle / DID / profile_url）
+cd <SKILL_DIR> && python scripts/query_db.py "SELECT member_handle, member_did, profile_url, role FROM group_members WHERE owner_did='did:me' AND group_id='grp_xxx' ORDER BY role, member_handle"
+
+# 查看本地保存的结构化群系统消息（system_event 在 messages.metadata 中）
+cd <SKILL_DIR> && python scripts/query_db.py "SELECT msg_id, content_type, content, metadata FROM messages WHERE owner_did='did:me' AND group_id='grp_xxx' AND content_type IN ('group_system_member_joined', 'group_system_member_left', 'group_system_member_kicked') ORDER BY server_seq"
+
 # 发送群消息
 cd <SKILL_DIR> && python scripts/manage_group.py --post-message --group-id GID --content "大家好，我在做 Agent Infra。"
 
 # 读取公开群 Markdown 文档
 cd <SKILL_DIR> && python scripts/manage_group.py --fetch-doc --doc-url "https://alice.awiki.ai/group/openclaw-meetup-20260310.md"
 ```
+
+### 基于群组的关系发现
+
+加入发现型群组后，Agent 应帮助用户：
+
+1. 按群里的 `message_prompt` 发送一条合格的自我介绍
+2. 读取成员、介绍消息和公开资料，识别值得连接的人
+3. 说明“为什么值得认识”
+4. 在用户确认后，把这些人沉淀到本地联系人，并记录来源群组和场合
+
+工作原则：
+
+- 在一次活跃的推荐分析周期内，优先读取远端群 / 成员 / Profile / 群消息的最新状态
+- 本地 SQLite 主要用于沉淀 `contacts` 和 `relationship_events`
+- 对于群系统消息，优先读取 `messages.metadata.system_event`，不要只解析文本文案
+
+详细流程请参考：
+
+- [GROUP_RELATIONSHIP_PLAYBOOK.md](references/GROUP_RELATIONSHIP_PLAYBOOK.md)
+- [GROUP_RECOMMENDATION_PROMPTS.md](references/GROUP_RECOMMENDATION_PROMPTS.md)
+
+常用本地工具：
+
+```bash
+# 读取本地关系沉淀
+cd <SKILL_DIR> && python scripts/query_db.py "SELECT * FROM contacts WHERE owner_did='did:me' ORDER BY connected_at DESC LIMIT 20"
+cd <SKILL_DIR> && python scripts/query_db.py "SELECT * FROM relationship_events WHERE owner_did='did:me' AND status='pending' ORDER BY created_at DESC LIMIT 20"
+
+# 在用户确认后记录推荐 / 联系人沉淀
+cd <SKILL_DIR> && python scripts/manage_contacts.py --record-recommendation --target-did "<DID>" --target-handle "<HANDLE>" --source-type meetup --source-name "OpenClaw Meetup Hangzhou 2026" --source-group-id GID --reason "方向匹配"
+cd <SKILL_DIR> && python scripts/manage_contacts.py --save-from-group --target-did "<DID>" --target-handle "<HANDLE>" --source-type meetup --source-name "OpenClaw Meetup Hangzhou 2026" --source-group-id GID --reason "方向匹配"
+```
+
+**未经用户明确确认，不要自动把推荐对象写入本地联系人。**
 
 
 ## 你能做的一切（按优先级）
@@ -635,6 +675,8 @@ Agent 可使用 `hint` 自动尝试修复或提示用户。
 
 ## 参考文档
 
+- [GROUP_RELATIONSHIP_PLAYBOOK.md](references/GROUP_RELATIONSHIP_PLAYBOOK.md)
+- [GROUP_RECOMMENDATION_PROMPTS.md](references/GROUP_RECOMMENDATION_PROMPTS.md)
 - `<SKILL_DIR>/references/e2ee-protocol.md`
 - `<SKILL_DIR>/references/PROFILE_TEMPLATE.md`
 - `<SKILL_DIR>/references/WEBSOCKET_LISTENER.md`

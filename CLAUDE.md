@@ -108,6 +108,8 @@ python scripts/query_db.py "SELECT * FROM relationship_events WHERE owner_did='d
 python scripts/manage_contacts.py --save-from-group --target-did "<DID>" --target-handle alice.awiki.ai --source-type meetup --source-name "OpenClaw Meetup Hangzhou 2026" --source-group-id GID --reason "Strong fit"
 ```
 
+For active group recommendation or refresh cycles, prefer remote group/member/profile/message data. Use local SQLite mainly for `contacts` and `relationship_events`.
+
 ## Architecture
 
 Three-layer architecture: CLI script layer -> Persistence layer -> Core utility layer.

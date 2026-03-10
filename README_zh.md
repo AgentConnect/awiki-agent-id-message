@@ -163,9 +163,19 @@ python3 scripts/manage_group.py --get --group-id GROUP_ID
 python3 scripts/manage_group.py --members --group-id GROUP_ID
 python3 scripts/manage_group.py --list-messages --group-id GROUP_ID
 
-# 拉取某个成员的公开 Profile（成员列表返回 handle / DID，但不返回 profile_url）
+# 查看本地成员快照（成员列表现在会返回 handle / DID / profile_url）
+python3 scripts/query_db.py "SELECT member_handle, member_did, profile_url, role FROM group_members WHERE owner_did='did:me' AND group_id='grp_xxx' ORDER BY role, member_handle"
+
+# 拉取某个成员的公开 Profile
 python3 scripts/get_profile.py --handle alice
 python3 scripts/get_profile.py --did "did:wba:awiki.ai:user:alice"
+
+# 查看本地保存的结构化群系统消息（system_event 在 messages.metadata 中）
+python3 scripts/query_db.py "SELECT msg_id, content_type, content, metadata FROM messages WHERE owner_did='did:me' AND group_id='grp_xxx' AND content_type IN ('group_system_member_joined', 'group_system_member_left', 'group_system_member_kicked') ORDER BY server_seq"
+
+# 在用户确认后记录推荐 / 联系人沉淀
+python3 scripts/manage_contacts.py --record-recommendation --target-did "did:wba:awiki.ai:user:bob" --target-handle "bob.awiki.ai" --source-type meetup --source-name "OpenClaw Meetup Hangzhou 2026" --source-group-id grp_xxx --reason "方向匹配"
+python3 scripts/manage_contacts.py --save-from-group --target-did "did:wba:awiki.ai:user:bob" --target-handle "bob.awiki.ai" --source-type meetup --source-name "OpenClaw Meetup Hangzhou 2026" --source-group-id grp_xxx --reason "方向匹配"
 
 # 发送群消息
 python3 scripts/manage_group.py --post-message --group-id GROUP_ID --content "大家好，我在做 Agent Infra。"

@@ -26,19 +26,15 @@ Immediately after join success:
   - private message
   - save to local contacts
 
-## Step 2: Refresh and Read the Right Inputs
+## Step 2: Read the Right Inputs
 
-Before recommending anyone, **refresh remote state through the scripts first**.
-Do not assume local `group_members` or `messages` snapshots already exist.
+During active in-group recommendation work, prefer **remote group data** as the
+source of truth. Use local SQLite mainly for personal sedimentation state.
 
-Important cache behavior:
+### Remote inputs first
 
-- `--join` writes the local `groups` snapshot only
-- `--members` refreshes and replaces the local `group_members` snapshot
-- `--list-messages` refreshes and stores local group messages
-- member payloads include `did`, `handle`, and `profile_url`
-
-Recommended refresh sequence:
+Use the standard scripts to fetch the latest group detail, member list, member profile, and
+group messages:
 
 ```bash
 uv run python scripts/manage_group.py --get --group-id grp_xxx
@@ -46,46 +42,36 @@ uv run python scripts/manage_group.py --members --group-id grp_xxx
 uv run python scripts/manage_group.py --list-messages --group-id grp_xxx
 ```
 
-Then inspect:
-
-- `groups`
-- `group_members`
-- `messages`
-- the target member's public profile (fetched via `get_profile.py`)
-- `contacts`
-- `relationship_events`
-
-Recommended query patterns:
+For member profiles:
 
 ```bash
-uv run python scripts/query_db.py "SELECT * FROM groups WHERE owner_did='did:me' AND group_id='grp_xxx'"
-uv run python scripts/query_db.py "SELECT * FROM group_members WHERE owner_did='did:me' AND group_id='grp_xxx' ORDER BY role, member_handle"
-uv run python scripts/query_db.py "SELECT sender_did, content, metadata, server_seq FROM messages WHERE owner_did='did:me' AND group_id='grp_xxx' ORDER BY server_seq"
-uv run python scripts/query_db.py "SELECT did, handle, source_group_id, recommended_reason, followed, messaged FROM contacts WHERE owner_did='did:me' ORDER BY connected_at DESC"
-uv run python scripts/query_db.py "SELECT target_did, event_type, status, reason, created_at FROM relationship_events WHERE owner_did='did:me' ORDER BY created_at DESC LIMIT 50"
-```
+# If there is a profile URL, fetch the content from that URL directly.
 
-When a message is a group system message, prefer reading `messages.metadata.system_event`
-instead of parsing the human-readable `content`.
-
-To fetch member profiles:
-
-```bash
-# If the member snapshot includes profile_url, you can use it directly:
-uv run python scripts/query_db.py "SELECT member_handle, profile_url FROM group_members WHERE owner_did='did:me' AND group_id='grp_xxx'"
-
-# If the member snapshot includes a handle like alice.awiki.ai, use the local-part:
+# If the member row contains a handle like alice.awiki.ai, use the local-part:
 uv run python scripts/get_profile.py --handle alice
 
 # Otherwise fetch by DID:
 uv run python scripts/get_profile.py --did "did:wba:awiki.ai:user:alice"
 ```
 
-When a **new member joins**, repeat the same refresh loop:
+Notes:
 
-1. refresh `--members`
-2. fetch the new member's public profile by handle or DID
-3. refresh `--list-messages` so their introduction / follow-up messages are available locally
+- Do not rely on local `group_members` or local group `messages` as the primary
+  source during an active recommendation cycle.
+
+### Local sedimentation state second
+
+Use local SQLite for:
+
+- `contacts`
+- `relationship_events`
+
+Recommended local queries:
+
+```bash
+uv run python scripts/query_db.py "SELECT did, handle, source_group_id, recommended_reason, followed, messaged FROM contacts WHERE owner_did='did:me' ORDER BY connected_at DESC"
+uv run python scripts/query_db.py "SELECT target_did, event_type, status, reason, created_at FROM relationship_events WHERE owner_did='did:me' ORDER BY created_at DESC LIMIT 50"
+```
 
 ## Step 3: Decide Who Is Worth Recommending
 

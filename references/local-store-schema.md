@@ -218,17 +218,15 @@ Migration history:
 
 ## Querying with `query_db.py`
 
-AI agents should inspect local state through the existing read-only query CLI.
+Use this section for **local cache inspection / offline debugging**.
 
-Before querying `group_members` or group `messages`, refresh the local cache first:
+For active group recommendation work, prefer remote fetches through
+`manage_group.py` and `get_profile.py`, and treat local SQLite as secondary
+state.
 
-```bash
-uv run python scripts/manage_group.py --get --group-id grp_xxx
-uv run python scripts/manage_group.py --members --group-id grp_xxx
-uv run python scripts/manage_group.py --list-messages --group-id grp_xxx
-```
-
-`--join` alone does not populate the local `group_members` snapshot or group message history.
+If you explicitly want to inspect local group caches, remember that `--join`
+alone does not guarantee a fresh `group_members` snapshot or complete group
+message history.
 
 ```bash
 uv run python scripts/query_db.py "SELECT * FROM groups WHERE owner_did='did:me' ORDER BY last_message_at DESC LIMIT 10"

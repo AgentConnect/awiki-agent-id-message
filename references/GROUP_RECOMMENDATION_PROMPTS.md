@@ -53,10 +53,13 @@ Before analysis, refresh state through the scripts:
 - `python scripts/manage_group.py --members --group-id <GROUP_ID>`
 - `python scripts/manage_group.py --list-messages --group-id <GROUP_ID>`
 
+Source-of-truth rule:
+- prefer remote group detail, member list, member profiles, and group messages
+- use local SQLite mainly for `contacts` and `relationship_events`
+
 For candidate inspection:
 - if a member handle is available, fetch the member profile with `python scripts/get_profile.py --handle <local_part>`
 - otherwise fetch the member profile with `python scripts/get_profile.py --did <DID>`
-- if the member snapshot already includes `profile_url`, prefer using it as the canonical public profile link
 
 You must inspect:
 - group goal and rules
@@ -144,6 +147,7 @@ Before writing the analysis:
 - refresh the member snapshot
 - fetch public profiles for newly joined members by handle or DID
 - refresh group messages again so any new introductions are available locally
+- treat local SQLite as secondary support data, mainly for contacts / relationship history
 
 Output exactly:
 

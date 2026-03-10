@@ -572,11 +572,6 @@ cd <SKILL_DIR> && python scripts/manage_group.py --set-join-enabled --group-id G
 # Join with the global 6-digit join code
 cd <SKILL_DIR> && python scripts/manage_group.py --join --passcode 314159
 
-# Refresh local snapshots after joining
-cd <SKILL_DIR> && python scripts/manage_group.py --get --group-id GID
-cd <SKILL_DIR> && python scripts/manage_group.py --members --group-id GID
-cd <SKILL_DIR> && python scripts/manage_group.py --list-messages --group-id GID
-
 # Post a group message
 cd <SKILL_DIR> && python scripts/manage_group.py --post-message --group-id GID --content "Hello everyone"
 
@@ -593,27 +588,20 @@ After joining a discovery group, the agent should help the user:
 3. explain *why* someone is worth connecting with
 4. save confirmed people into local contact sedimentation with source-group context
 
+Working rule:
+
+- prefer remote group/member/profile/message data during an active recommendation cycle
+- use local SQLite mainly for `contacts` and `relationship_events`
+
 Use [GROUP_RELATIONSHIP_PLAYBOOK.md](references/GROUP_RELATIONSHIP_PLAYBOOK.md) for the detailed workflow.
 Use [GROUP_RECOMMENDATION_PROMPTS.md](references/GROUP_RECOMMENDATION_PROMPTS.md) when you need a stronger structured prompt/output template for recommendations, periodic refreshes, or pre-save confirmation.
 
 Useful local tools:
 
 ```bash
-# Refresh local group state before recommendation work
-cd <SKILL_DIR> && python scripts/manage_group.py --get --group-id GID
-cd <SKILL_DIR> && python scripts/manage_group.py --members --group-id GID
-cd <SKILL_DIR> && python scripts/manage_group.py --list-messages --group-id GID
-
 # Read local relationship state
-cd <SKILL_DIR> && python scripts/query_db.py "SELECT * FROM groups WHERE owner_did='did:me' AND group_id='grp_xxx'"
-cd <SKILL_DIR> && python scripts/query_db.py "SELECT user_id, member_handle, member_did, profile_url, role FROM group_members WHERE owner_did='did:me' AND group_id='grp_xxx' ORDER BY role, member_handle"
-cd <SKILL_DIR> && python scripts/query_db.py "SELECT sender_did, content, server_seq FROM messages WHERE owner_did='did:me' AND group_id='grp_xxx' AND content_type='group_user' ORDER BY server_seq"
 cd <SKILL_DIR> && python scripts/query_db.py "SELECT * FROM contacts WHERE owner_did='did:me' ORDER BY connected_at DESC LIMIT 20"
 cd <SKILL_DIR> && python scripts/query_db.py "SELECT * FROM relationship_events WHERE owner_did='did:me' AND status='pending' ORDER BY created_at DESC LIMIT 20"
-
-# Fetch public profiles for candidate members (or reuse profile_url directly from group_members)
-cd <SKILL_DIR> && python scripts/get_profile.py --handle alice
-cd <SKILL_DIR> && python scripts/get_profile.py --did "<DID>"
 
 # Record recommendation / confirmation
 cd <SKILL_DIR> && python scripts/manage_contacts.py --record-recommendation --target-did "<DID>" --target-handle "<HANDLE>" --source-type meetup --source-name "OpenClaw Meetup Hangzhou 2026" --source-group-id GID --reason "Strong fit"
