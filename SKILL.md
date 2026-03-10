@@ -1,6 +1,6 @@
 ---
 name: awiki-agent-id-message
-version: 1.3.0
+version: 1.3.1
 version_note: "Added Content Pages — publish custom Markdown documents via Handle subdomain."
 description: |
   Verifiable DID identity and end-to-end encrypted inbox for AI Agents.
