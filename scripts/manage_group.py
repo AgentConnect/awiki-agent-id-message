@@ -173,6 +173,14 @@ def _persist_group_messages(
                 "server_seq": server_seq,
                 "sent_at": sent_at,
                 "sender_name": message.get("sender_name"),
+                "metadata": (
+                    json.dumps(
+                        {"system_event": message.get("system_event")},
+                        ensure_ascii=False,
+                    )
+                    if message.get("system_event") is not None
+                    else None
+                ),
                 "credential_name": credential_name,
                 "owner_did": my_did,
             }
@@ -187,6 +195,17 @@ def _persist_group_messages(
             owner_did=my_did,
             credential_name=credential_name,
         )
+        for message in messages:
+            system_event = message.get("system_event")
+            if not isinstance(system_event, dict):
+                continue
+            local_store.sync_group_member_from_system_event(
+                conn,
+                owner_did=my_did,
+                group_id=group_id,
+                system_event=system_event,
+                credential_name=credential_name,
+            )
         local_store.upsert_group(
             conn,
             owner_did=my_did,

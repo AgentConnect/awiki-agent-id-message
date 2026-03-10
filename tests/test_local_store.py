@@ -89,14 +89,14 @@ class TestSchema:
 
     def test_schema_version(self, db):
         version = db.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 8
+        assert version == 9
 
     def test_ensure_schema_idempotent(self, db):
         """Calling ensure_schema multiple times is safe."""
         local_store.ensure_schema(db)
         local_store.ensure_schema(db)
         version = db.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 8
+        assert version == 9
 
     def test_wal_mode(self, db):
         mode = db.execute("PRAGMA journal_mode").fetchone()[0]
@@ -137,6 +137,7 @@ class TestSchema:
         assert "join_code_expires_at" in group_columns
         assert "group_owner_did" in group_columns
         assert "member_did" in group_member_columns
+        assert "profile_url" in group_member_columns
         assert "event_type" in relationship_event_columns
         assert "source_group_id" in relationship_event_columns
         assert "score" in relationship_event_columns
@@ -164,7 +165,7 @@ class TestSchema:
         after_indexes = _schema_object_names(db, "index")
         version = db.execute("PRAGMA user_version").fetchone()[0]
 
-        assert version == 8
+        assert version == 9
         assert EXPECTED_SCHEMA_INDEXES <= after_indexes
 
 
@@ -481,6 +482,7 @@ class TestGroups:
                     "user_id": "user_1",
                     "did": "did:alice",
                     "handle": "alice.awiki.ai",
+                    "profile_url": "https://awiki.ai/profiles/user_1",
                     "role": "owner",
                     "joined_at": "2026-03-10T00:00:00+00:00",
                     "sent_message_count": 1,
@@ -489,6 +491,7 @@ class TestGroups:
                     "user_id": "user_2",
                     "did": "did:bob",
                     "handle": "bob.awiki.ai",
+                    "profile_url": "https://awiki.ai/profiles/user_2",
                     "role": "member",
                     "joined_at": "2026-03-10T00:01:00+00:00",
                     "sent_message_count": 0,
@@ -505,6 +508,7 @@ class TestGroups:
                     "user_id": "user_1",
                     "did": "did:alice",
                     "handle": "alice.awiki.ai",
+                    "profile_url": "https://awiki.ai/profiles/user_1",
                     "role": "owner",
                     "joined_at": "2026-03-10T00:00:00+00:00",
                     "sent_message_count": 2,
@@ -514,13 +518,14 @@ class TestGroups:
         )
         rows = db.execute(
             """
-            SELECT user_id, sent_message_count
+            SELECT user_id, profile_url, sent_message_count
             FROM group_members
             WHERE owner_did='did:alice' AND group_id='grp_1'
             """
         ).fetchall()
         assert len(rows) == 1
         assert rows[0]["user_id"] == "user_1"
+        assert rows[0]["profile_url"] == "https://awiki.ai/profiles/user_1"
         assert rows[0]["sent_message_count"] == 2
 
     def test_delete_group_members_by_target_did(self, db):
@@ -552,6 +557,45 @@ class TestGroups:
         ).fetchone()[0]
         assert deleted == 1
         assert count == 1
+
+    def test_sync_group_member_from_system_event_updates_status(self, db):
+        local_store.upsert_group(
+            db,
+            owner_did="did:alice",
+            group_id="grp_1",
+            name="Group One",
+        )
+        synced = local_store.sync_group_member_from_system_event(
+            db,
+            owner_did="did:alice",
+            group_id="grp_1",
+            system_event={
+                "kind": "member_joined",
+                "subject": {
+                    "id": "user_2",
+                    "did": "did:bob",
+                    "handle": "bob.awiki.ai",
+                    "profile_url": "https://awiki.ai/profiles/user_2",
+                },
+                "actor": {
+                    "id": "user_2",
+                    "did": "did:bob",
+                    "handle": "bob.awiki.ai",
+                    "profile_url": "https://awiki.ai/profiles/user_2",
+                },
+            },
+        )
+        row = db.execute(
+            """
+            SELECT status, member_did, profile_url
+            FROM group_members
+            WHERE owner_did='did:alice' AND group_id='grp_1' AND user_id='user_2'
+            """
+        ).fetchone()
+        assert synced is True
+        assert row["status"] == "active"
+        assert row["member_did"] == "did:bob"
+        assert row["profile_url"] == "https://awiki.ai/profiles/user_2"
 
 
 class TestE2eeOutbox:
@@ -854,7 +898,7 @@ class TestMigration:
         }
         conn.close()
 
-        assert version == 8
+        assert version == 9
         assert migrated_message["owner_did"] == "did:alice"
         assert migrated_contact["owner_did"] == "did:alice"
         assert migrated_outbox["owner_did"] == "did:alice"

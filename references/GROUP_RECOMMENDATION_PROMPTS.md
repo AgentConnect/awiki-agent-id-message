@@ -48,11 +48,22 @@ Use this template when:
 ```markdown
 Analyze the discovery group and recommend valuable people for the user to meet.
 
+Before analysis, refresh state through the scripts:
+- `python scripts/manage_group.py --get --group-id <GROUP_ID>`
+- `python scripts/manage_group.py --members --group-id <GROUP_ID>`
+- `python scripts/manage_group.py --list-messages --group-id <GROUP_ID>`
+
+For candidate inspection:
+- if a member handle is available, fetch the member profile with `python scripts/get_profile.py --handle <local_part>`
+- otherwise fetch the member profile with `python scripts/get_profile.py --did <DID>`
+- if the member snapshot already includes `profile_url`, prefer using it as the canonical public profile link
+
 You must inspect:
 - group goal and rules
 - group message prompt
 - group members
 - group messages
+- structured system events in message metadata when available
 - public profile / handle info when available
 - local contacts
 - local relationship events
@@ -128,6 +139,12 @@ Focus on:
 - new introduction messages
 - changes since the last recommendation cycle
 
+Before writing the analysis:
+- refresh the group snapshot
+- refresh the member snapshot
+- fetch public profiles for newly joined members by handle or DID
+- refresh group messages again so any new introductions are available locally
+
 Output exactly:
 
 ## What changed since last review
@@ -172,6 +189,7 @@ Before using any recommendation output, verify:
 
 - the recommendation reason is specific, not generic
 - the evidence points to actual profile / message / local-state signals
+- if a system message is involved, the recommendation uses `system_event` instead of only parsing the text content
 - the action is proportional to confidence
 - the person is not already over-handled locally
 - the final user question is explicit and easy to answer

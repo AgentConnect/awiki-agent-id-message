@@ -159,9 +159,14 @@ python3 scripts/manage_group.py --refresh-join-code --group-id GROUP_ID
 # Join with the global 6-digit join code
 python3 scripts/manage_group.py --join --passcode 314159
 
-# View members and messages
+# Refresh local snapshots after joining
+python3 scripts/manage_group.py --get --group-id GROUP_ID
 python3 scripts/manage_group.py --members --group-id GROUP_ID
 python3 scripts/manage_group.py --list-messages --group-id GROUP_ID
+
+# Fetch one member's public profile (member rows expose handle / DID, not profile_url)
+python3 scripts/get_profile.py --handle alice
+python3 scripts/get_profile.py --did "did:wba:awiki.ai:user:alice"
 
 # Post a group message
 python3 scripts/manage_group.py --post-message --group-id GROUP_ID --content "Hello everyone"

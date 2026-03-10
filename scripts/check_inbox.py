@@ -424,6 +424,14 @@ def _store_inbox_messages(
                 "server_seq": msg.get("server_seq"),
                 "sent_at": msg.get("sent_at") or msg.get("created_at"),
                 "sender_name": msg.get("sender_name"),
+                "metadata": (
+                    json.dumps(
+                        {"system_event": msg.get("system_event")},
+                        ensure_ascii=False,
+                    )
+                    if msg.get("system_event") is not None
+                    else None
+                ),
             })
         local_store.store_messages_batch(
             conn,
@@ -454,6 +462,18 @@ def _store_inbox_messages(
                 membership_status="active",
                 last_synced_seq=msg.get("server_seq"),
                 last_message_at=msg.get("sent_at") or msg.get("created_at"),
+                credential_name=credential_name,
+            )
+        for msg in messages:
+            group_id = str(msg.get("group_id") or "")
+            system_event = msg.get("system_event")
+            if not group_id or not isinstance(system_event, dict):
+                continue
+            local_store.sync_group_member_from_system_event(
+                conn,
+                owner_did=my_did,
+                group_id=group_id,
+                system_event=system_event,
                 credential_name=credential_name,
             )
         # Record senders in contacts

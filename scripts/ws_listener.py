@@ -430,6 +430,14 @@ async def listen_loop(
                                 sent_at=params.get("sent_at"),
                                 is_e2ee=bool(params.get("_e2ee")),
                                 sender_name=params.get("sender_name"),
+                                metadata=(
+                                    json.dumps(
+                                        {"system_event": params.get("system_event")},
+                                        ensure_ascii=False,
+                                    )
+                                    if params.get("system_event") is not None
+                                    else None
+                                ),
                                 credential_name=credential_name,
                             )
                             if params.get("group_id"):
@@ -443,6 +451,15 @@ async def listen_loop(
                                     membership_status="active",
                                     last_synced_seq=params.get("server_seq"),
                                     last_message_at=params.get("sent_at"),
+                                    credential_name=credential_name,
+                                )
+                            if params.get("group_id") and isinstance(params.get("system_event"), dict):
+                                await asyncio.to_thread(
+                                    local_store.sync_group_member_from_system_event,
+                                    local_db,
+                                    owner_did=my_did,
+                                    group_id=str(params.get("group_id", "")),
+                                    system_event=params.get("system_event"),
                                     credential_name=credential_name,
                                 )
                             # Record sender in contacts

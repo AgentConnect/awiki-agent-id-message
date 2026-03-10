@@ -35,8 +35,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Query local SQLite database")
     parser.add_argument("sql", type=str, help="SQL statement to execute")
     parser.add_argument(
-        "--credential", type=str, default=None,
-        help="Credential name filter (optional, for filtering messages by credential)",
+        "--credential",
+        type=str,
+        default=None,
+        help="Legacy option; prefer explicit owner_did / credential_name filters in SQL",
     )
 
     args = parser.parse_args()

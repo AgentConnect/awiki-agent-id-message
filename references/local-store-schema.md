@@ -65,7 +65,7 @@ allows the same server message to be stored for multiple local identities.
 | is_e2ee | INTEGER | DEFAULT 0 | 1 if message was E2EE encrypted |
 | is_read | INTEGER | DEFAULT 0 | 1 if message has been read |
 | sender_name | TEXT | | Display name of sender |
-| metadata | TEXT | | JSON metadata |
+| metadata | TEXT | | JSON metadata; group system messages may store structured `system_event` here |
 | credential_name | TEXT | NOT NULL, DEFAULT '' | Credential alias used when the message was stored |
 
 #### Indexes
@@ -126,6 +126,7 @@ Stores the latest cached active-member snapshot for one group.
 | user_id | TEXT | PRIMARY KEY (with `owner_did`, `group_id`) | Remote user identifier |
 | member_did | TEXT | | Remote member DID |
 | member_handle | TEXT | | Remote member handle |
+| profile_url | TEXT | | Public profile URL for the remote member |
 | role | TEXT | | Cached member role |
 | status | TEXT | NOT NULL, DEFAULT `active` | Cached member status |
 | joined_at | TEXT | | Remote join time |
@@ -200,7 +201,7 @@ Thread IDs are deterministic and symmetric:
 
 ## Schema Versioning
 
-Schema version tracked via `PRAGMA user_version`. Current version: **8**.
+Schema version tracked via `PRAGMA user_version`. Current version: **9**.
 
 Migration history:
 - v1 → v2: adds `credential_name TEXT` column and `idx_messages_credential` index
@@ -213,16 +214,27 @@ Migration history:
   message indexes for incremental sync
 - v7 → v8: extends `contacts` with source / follow-up fields and adds
   append-only `relationship_events`
+- v8 → v9: adds `profile_url` to local `group_members` snapshots
 
 ## Querying with `query_db.py`
 
-AI agents should inspect local state through the existing read-only query CLI:
+AI agents should inspect local state through the existing read-only query CLI.
+
+Before querying `group_members` or group `messages`, refresh the local cache first:
 
 ```bash
-uv run python scripts/query_db.py "SELECT * FROM groups ORDER BY last_message_at DESC LIMIT 10"
-uv run python scripts/query_db.py "SELECT * FROM group_members WHERE group_id='grp_xxx' ORDER BY role, member_handle"
-uv run python scripts/query_db.py "SELECT msg_id, direction, content_type, content, server_seq FROM messages WHERE group_id='grp_xxx' ORDER BY server_seq"
-uv run python scripts/query_db.py "SELECT * FROM relationship_events WHERE status='pending' ORDER BY created_at DESC LIMIT 20"
+uv run python scripts/manage_group.py --get --group-id grp_xxx
+uv run python scripts/manage_group.py --members --group-id grp_xxx
+uv run python scripts/manage_group.py --list-messages --group-id grp_xxx
+```
+
+`--join` alone does not populate the local `group_members` snapshot or group message history.
+
+```bash
+uv run python scripts/query_db.py "SELECT * FROM groups WHERE owner_did='did:me' ORDER BY last_message_at DESC LIMIT 10"
+uv run python scripts/query_db.py "SELECT * FROM group_members WHERE owner_did='did:me' AND group_id='grp_xxx' ORDER BY role, member_handle"
+uv run python scripts/query_db.py "SELECT msg_id, direction, content_type, content, server_seq FROM messages WHERE owner_did='did:me' AND group_id='grp_xxx' AND content_type='group_user' ORDER BY server_seq"
+uv run python scripts/query_db.py "SELECT * FROM relationship_events WHERE owner_did='did:me' AND status='pending' ORDER BY created_at DESC LIMIT 20"
 ```
 
 Useful starter queries:
@@ -231,21 +243,30 @@ Useful starter queries:
   ```sql
   SELECT owner_did, group_id, name, my_role, membership_status, member_count, last_message_at
   FROM groups
-  WHERE membership_status = 'active'
+  WHERE owner_did = 'did:me' AND membership_status = 'active'
   ORDER BY last_message_at DESC;
   ```
 - Inspect one group's latest member snapshot:
   ```sql
-  SELECT user_id, member_did, member_handle, role, status, sent_message_count
+  SELECT user_id, member_did, member_handle, profile_url, role, status, sent_message_count
   FROM group_members
   WHERE owner_did = 'did:me' AND group_id = 'grp_xxx'
   ORDER BY role, member_handle;
   ```
 - Inspect one group's local message history:
   ```sql
-  SELECT msg_id, direction, sender_did, content_type, content, server_seq, sent_at
+  SELECT msg_id, direction, sender_did, content_type, content, metadata, server_seq, sent_at
   FROM messages
-  WHERE owner_did = 'did:me' AND group_id = 'grp_xxx'
+  WHERE owner_did = 'did:me' AND group_id = 'grp_xxx' AND content_type = 'group_user'
+  ORDER BY COALESCE(server_seq, 0), COALESCE(sent_at, stored_at);
+  ```
+- Inspect one group's system events:
+  ```sql
+  SELECT msg_id, content_type, content, metadata, server_seq, sent_at
+  FROM messages
+  WHERE owner_did = 'did:me'
+    AND group_id = 'grp_xxx'
+    AND content_type IN ('group_system_member_joined', 'group_system_member_left', 'group_system_member_kicked')
   ORDER BY COALESCE(server_seq, 0), COALESCE(sent_at, stored_at);
   ```
 - Inspect saved contacts from one group:

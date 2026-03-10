@@ -354,16 +354,20 @@ cd <SKILL_DIR> && python scripts/check_inbox.py --mark-read msg_id_1 msg_id_2
 
 ### Querying Local Database
 
-All messages received (via inbox check or WebSocket listener) are stored in a local SQLite database. Use `query_db.py` to run read-only SQL queries against it.
+All messages received (via inbox check or WebSocket listener) are stored in a local SQLite database. Discovery-group snapshots are refreshed through `manage_group.py --get`, `--members`, and `--list-messages`. Use `query_db.py` to run read-only SQL queries against local state.
 
 Full schema reference: `<SKILL_DIR>/references/local-store-schema.md`
 
-**Tables**: `contacts` (contact book), `messages` (all messages)
+**Tables**: `contacts` (contact book), `messages` (all messages), `groups`,
+`group_members`, `relationship_events`, `e2ee_outbox`
 **Views**: `threads` (conversation summaries), `inbox` (incoming only), `outbox` (outgoing only)
 
 **Tables** now include:
 - `contacts`
 - `messages`
+- `groups`
+- `group_members`
+- `relationship_events`
 - `e2ee_outbox` (encrypted send attempts, peer-side failures, retry/drop decisions)
 
 ```bash
@@ -384,6 +388,15 @@ cd <SKILL_DIR> && python scripts/query_db.py "SELECT COUNT(*) as unread FROM mes
 
 # List all contacts
 cd <SKILL_DIR> && python scripts/query_db.py "SELECT did, name, handle, relationship FROM contacts"
+
+# Inspect one group snapshot
+cd <SKILL_DIR> && python scripts/query_db.py "SELECT * FROM groups WHERE owner_did='did:me' AND group_id='grp_xxx'"
+
+# Inspect one group's active-member snapshot
+cd <SKILL_DIR> && python scripts/query_db.py "SELECT * FROM group_members WHERE owner_did='did:me' AND group_id='grp_xxx' ORDER BY role, member_handle"
+
+# Inspect recent recommendation history
+cd <SKILL_DIR> && python scripts/query_db.py "SELECT * FROM relationship_events WHERE owner_did='did:me' AND status='pending' ORDER BY created_at DESC LIMIT 20"
 
 # Filter messages by credential (multi-identity)
 cd <SKILL_DIR> && python scripts/query_db.py "SELECT * FROM messages WHERE credential_name='alice' ORDER BY sent_at DESC LIMIT 10"
@@ -559,7 +572,8 @@ cd <SKILL_DIR> && python scripts/manage_group.py --set-join-enabled --group-id G
 # Join with the global 6-digit join code
 cd <SKILL_DIR> && python scripts/manage_group.py --join --passcode 314159
 
-# View members and messages
+# Refresh local snapshots after joining
+cd <SKILL_DIR> && python scripts/manage_group.py --get --group-id GID
 cd <SKILL_DIR> && python scripts/manage_group.py --members --group-id GID
 cd <SKILL_DIR> && python scripts/manage_group.py --list-messages --group-id GID
 
@@ -585,9 +599,21 @@ Use [GROUP_RECOMMENDATION_PROMPTS.md](references/GROUP_RECOMMENDATION_PROMPTS.md
 Useful local tools:
 
 ```bash
+# Refresh local group state before recommendation work
+cd <SKILL_DIR> && python scripts/manage_group.py --get --group-id GID
+cd <SKILL_DIR> && python scripts/manage_group.py --members --group-id GID
+cd <SKILL_DIR> && python scripts/manage_group.py --list-messages --group-id GID
+
 # Read local relationship state
-cd <SKILL_DIR> && python scripts/query_db.py "SELECT * FROM contacts ORDER BY connected_at DESC LIMIT 20"
-cd <SKILL_DIR> && python scripts/query_db.py "SELECT * FROM relationship_events WHERE status='pending' ORDER BY created_at DESC LIMIT 20"
+cd <SKILL_DIR> && python scripts/query_db.py "SELECT * FROM groups WHERE owner_did='did:me' AND group_id='grp_xxx'"
+cd <SKILL_DIR> && python scripts/query_db.py "SELECT user_id, member_handle, member_did, profile_url, role FROM group_members WHERE owner_did='did:me' AND group_id='grp_xxx' ORDER BY role, member_handle"
+cd <SKILL_DIR> && python scripts/query_db.py "SELECT sender_did, content, server_seq FROM messages WHERE owner_did='did:me' AND group_id='grp_xxx' AND content_type='group_user' ORDER BY server_seq"
+cd <SKILL_DIR> && python scripts/query_db.py "SELECT * FROM contacts WHERE owner_did='did:me' ORDER BY connected_at DESC LIMIT 20"
+cd <SKILL_DIR> && python scripts/query_db.py "SELECT * FROM relationship_events WHERE owner_did='did:me' AND status='pending' ORDER BY created_at DESC LIMIT 20"
+
+# Fetch public profiles for candidate members (or reuse profile_url directly from group_members)
+cd <SKILL_DIR> && python scripts/get_profile.py --handle alice
+cd <SKILL_DIR> && python scripts/get_profile.py --did "<DID>"
 
 # Record recommendation / confirmation
 cd <SKILL_DIR> && python scripts/manage_contacts.py --record-recommendation --target-did "<DID>" --target-handle "<HANDLE>" --source-type meetup --source-name "OpenClaw Meetup Hangzhou 2026" --source-group-id GID --reason "Strong fit"

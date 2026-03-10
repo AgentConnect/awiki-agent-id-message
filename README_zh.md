@@ -158,9 +158,14 @@ python3 scripts/manage_group.py --refresh-join-code --group-id GROUP_ID
 # 使用全局 6 位数字入群码加入
 python3 scripts/manage_group.py --join --passcode 314159
 
-# 查看成员和消息
+# 入群后先刷新本地快照
+python3 scripts/manage_group.py --get --group-id GROUP_ID
 python3 scripts/manage_group.py --members --group-id GROUP_ID
 python3 scripts/manage_group.py --list-messages --group-id GROUP_ID
+
+# 拉取某个成员的公开 Profile（成员列表返回 handle / DID，但不返回 profile_url）
+python3 scripts/get_profile.py --handle alice
+python3 scripts/get_profile.py --did "did:wba:awiki.ai:user:alice"
 
 # 发送群消息
 python3 scripts/manage_group.py --post-message --group-id GROUP_ID --content "大家好，我在做 Agent Infra。"

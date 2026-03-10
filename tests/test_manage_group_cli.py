@@ -377,9 +377,34 @@ class TestManageGroupCli:
                         "created_at": "2026-03-10T02:01:00+00:00",
                         "server_seq": 21,
                     },
+                    {
+                        "id": "msg_sys",
+                        "sender_did": None,
+                        "sender_name": "System",
+                        "group_id": "grp_1",
+                        "content": "bob.awiki.ai joined the group.",
+                        "type": "group_system_member_joined",
+                        "created_at": "2026-03-10T02:02:00+00:00",
+                        "server_seq": 22,
+                        "system_event": {
+                            "kind": "member_joined",
+                            "subject": {
+                                "id": "user_bob",
+                                "did": "did:bob",
+                                "handle": "bob.awiki.ai",
+                                "profile_url": "https://awiki.ai/profiles/user_bob",
+                            },
+                            "actor": {
+                                "id": "user_bob",
+                                "did": "did:bob",
+                                "handle": "bob.awiki.ai",
+                                "profile_url": "https://awiki.ai/profiles/user_bob",
+                            },
+                        },
+                    },
                 ],
-                "total": 2,
-                "next_since_seq": 21,
+                "total": 3,
+                "next_since_seq": 22,
             }
 
         monkeypatch.setattr(
@@ -403,6 +428,13 @@ class TestManageGroupCli:
             ORDER BY msg_id
             """
         ).fetchall()
+        system_row = conn.execute(
+            """
+            SELECT metadata
+            FROM messages
+            WHERE owner_did='did:alice' AND msg_id='msg_sys'
+            """
+        ).fetchone()
         group_row = conn.execute(
             """
             SELECT last_synced_seq, membership_status
@@ -410,12 +442,24 @@ class TestManageGroupCli:
             WHERE owner_did='did:alice' AND group_id='grp_1'
             """
         ).fetchone()
+        member_row = conn.execute(
+            """
+            SELECT user_id, member_did, profile_url, status
+            FROM group_members
+            WHERE owner_did='did:alice' AND group_id='grp_1' AND user_id='user_bob'
+            """
+        ).fetchone()
         conn.close()
         assert [(row["msg_id"], row["direction"]) for row in messages] == [
             ("msg_in", 0),
             ("msg_out", 1),
+            ("msg_sys", 0),
         ]
-        assert group_row["last_synced_seq"] == 21
+        assert '"kind": "member_joined"' in system_row["metadata"]
+        assert member_row["member_did"] == "did:bob"
+        assert member_row["profile_url"] == "https://awiki.ai/profiles/user_bob"
+        assert member_row["status"] == "active"
+        assert group_row["last_synced_seq"] == 22
         assert group_row["membership_status"] == "active"
 
     def test_list_members_replaces_local_member_snapshot(
@@ -439,6 +483,7 @@ class TestManageGroupCli:
                         "user_id": "user_1",
                         "did": "did:alice",
                         "handle": "alice.awiki.ai",
+                        "profile_url": "https://awiki.ai/profiles/user_1",
                         "role": "owner",
                         "joined_at": "2026-03-10T00:00:00+00:00",
                         "sent_message_count": 2,
@@ -447,6 +492,7 @@ class TestManageGroupCli:
                         "user_id": "user_2",
                         "did": "did:bob",
                         "handle": "bob.awiki.ai",
+                        "profile_url": "https://awiki.ai/profiles/user_2",
                         "role": "member",
                         "joined_at": "2026-03-10T00:01:00+00:00",
                         "sent_message_count": 1,
@@ -466,8 +512,13 @@ class TestManageGroupCli:
         )
 
         conn = local_store.get_connection()
-        count = conn.execute(
-            "SELECT COUNT(*) FROM group_members WHERE owner_did='did:alice' AND group_id='grp_1'"
-        ).fetchone()[0]
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS cnt, MAX(profile_url) AS any_profile_url
+            FROM group_members
+            WHERE owner_did='did:alice' AND group_id='grp_1'
+            """
+        ).fetchone()
         conn.close()
-        assert count == 2
+        assert row["cnt"] == 2
+        assert row["any_profile_url"] is not None

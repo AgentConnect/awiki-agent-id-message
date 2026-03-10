@@ -32,7 +32,7 @@ from utils.config import SDKConfig
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 9
 
 _V6_TABLES_SQL = """
     CREATE TABLE IF NOT EXISTS contacts (
@@ -142,6 +142,7 @@ _V7_EXTRA_TABLES_SQL = """
         user_id           TEXT NOT NULL,
         member_did        TEXT,
         member_handle     TEXT,
+        profile_url       TEXT,
         role              TEXT,
         status            TEXT NOT NULL DEFAULT 'active',
         joined_at         TEXT,
@@ -754,11 +755,31 @@ def _ensure_v8_contact_columns(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _ensure_v9_group_member_columns(conn: sqlite3.Connection) -> None:
+    """Ensure the group-member profile URL column added in v9 exists."""
+    group_member_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(group_members)").fetchall()
+    }
+    if "profile_url" not in group_member_columns:
+        conn.execute("ALTER TABLE group_members ADD COLUMN profile_url TEXT")
+
+
 def _upgrade_schema_v7_to_v8(conn: sqlite3.Connection) -> None:
     """Add contact provenance fields and relationship events on top of schema v7."""
     logger.info("Upgrading local schema from version=7 to version=%d", _SCHEMA_VERSION)
     _ensure_v8_contact_columns(conn)
     _create_schema_v8_extensions(conn)
+    _ensure_v6_indexes(conn)
+    _ensure_v7_indexes(conn)
+    _ensure_v8_indexes(conn)
+    _recreate_v6_views(conn)
+
+
+def _upgrade_schema_v8_to_v9(conn: sqlite3.Connection) -> None:
+    """Add group member profile URLs on top of schema v8."""
+    logger.info("Upgrading local schema from version=8 to version=%d", _SCHEMA_VERSION)
+    _ensure_v9_group_member_columns(conn)
     _ensure_v6_indexes(conn)
     _ensure_v7_indexes(conn)
     _ensure_v8_indexes(conn)
@@ -773,6 +794,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         conn.executescript(_V7_EXTRA_TABLES_SQL)
         conn.executescript(_V8_EXTRA_TABLES_SQL)
         _ensure_v8_contact_columns(conn)
+        _ensure_v9_group_member_columns(conn)
         repaired_indexes = (
             _ensure_v6_indexes(conn)
             + _ensure_v7_indexes(conn)
@@ -802,6 +824,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             version = 7
         if version < 8:
             _upgrade_schema_v7_to_v8(conn)
+            version = 8
+        if version < 9:
+            _upgrade_schema_v8_to_v9(conn)
 
     conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
     conn.commit()
@@ -1578,6 +1603,7 @@ def replace_group_members(
                 user_id,
                 _normalize_optional_text(member.get("did")),
                 _normalize_optional_text(member.get("handle")),
+                _normalize_optional_text(member.get("profile_url")),
                 _normalize_optional_text(member.get("role")),
                 _normalize_optional_text(member.get("status")) or "active",
                 _normalize_optional_text(member.get("joined_at")),
@@ -1591,13 +1617,161 @@ def replace_group_members(
         conn.executemany(
             """
             INSERT INTO group_members
-            (owner_did, group_id, user_id, member_did, member_handle, role, status,
-             joined_at, sent_message_count, last_synced_at, metadata, credential_name)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (owner_did, group_id, user_id, member_did, member_handle, profile_url, role,
+             status, joined_at, sent_message_count, last_synced_at, metadata, credential_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
     conn.commit()
+
+
+def upsert_group_member(
+    conn: sqlite3.Connection,
+    *,
+    owner_did: str,
+    group_id: str,
+    user_id: str,
+    member_did: str | None = None,
+    member_handle: str | None = None,
+    profile_url: str | None = None,
+    role: str | None = None,
+    status: str = "active",
+    joined_at: str | None = None,
+    sent_message_count: int | None = None,
+    metadata: str | dict[str, Any] | None = None,
+    credential_name: str | None = None,
+) -> None:
+    """Insert or update one cached group member row."""
+    normalized_owner_did = _normalize_owner_did(owner_did)
+    if not normalized_owner_did:
+        raise ValueError("owner_did is required for group member storage")
+    if not group_id or not user_id:
+        raise ValueError("group_id and user_id are required for group member storage")
+
+    existing = conn.execute(
+        """
+        SELECT * FROM group_members
+        WHERE owner_did = ? AND group_id = ? AND user_id = ?
+        """,
+        (normalized_owner_did, group_id, user_id),
+    ).fetchone()
+    row = dict(existing) if existing is not None else {}
+    now = datetime.now(timezone.utc).isoformat()
+    merged: dict[str, Any] = {
+        "owner_did": normalized_owner_did,
+        "group_id": group_id,
+        "user_id": user_id,
+        "member_did": row.get("member_did"),
+        "member_handle": row.get("member_handle"),
+        "profile_url": row.get("profile_url"),
+        "role": row.get("role", "member"),
+        "status": row.get("status", "active"),
+        "joined_at": row.get("joined_at"),
+        "sent_message_count": row.get("sent_message_count", 0),
+        "last_synced_at": now,
+        "metadata": row.get("metadata"),
+        "credential_name": row.get("credential_name", ""),
+    }
+    updates = {
+        "member_did": _normalize_optional_text(member_did),
+        "member_handle": _normalize_optional_text(member_handle),
+        "profile_url": _normalize_optional_text(profile_url),
+        "role": _normalize_optional_text(role),
+        "status": _normalize_optional_text(status),
+        "joined_at": _normalize_optional_text(joined_at),
+        "sent_message_count": _normalize_optional_int(sent_message_count),
+        "metadata": _normalize_metadata(metadata),
+    }
+    for key, value in updates.items():
+        if value is not None:
+            merged[key] = value
+    if credential_name is not None:
+        merged["credential_name"] = _normalize_credential_name(credential_name)
+
+    columns = (
+        "owner_did",
+        "group_id",
+        "user_id",
+        "member_did",
+        "member_handle",
+        "profile_url",
+        "role",
+        "status",
+        "joined_at",
+        "sent_message_count",
+        "last_synced_at",
+        "metadata",
+        "credential_name",
+    )
+    conn.execute(
+        f"""
+        INSERT OR REPLACE INTO group_members ({", ".join(columns)})
+        VALUES ({", ".join("?" for _ in columns)})
+        """,
+        tuple(merged[column] for column in columns),
+    )
+    conn.commit()
+
+
+def sync_group_member_from_system_event(
+    conn: sqlite3.Connection,
+    *,
+    owner_did: str,
+    group_id: str,
+    system_event: dict[str, Any],
+    credential_name: str | None = None,
+) -> bool:
+    """Apply one group system event to the local group_members snapshot."""
+    if not group_id or not system_event:
+        return False
+
+    subject = system_event.get("subject")
+    if not isinstance(subject, dict):
+        return False
+
+    subject_user_id = str(subject.get("id") or "").strip()
+    if not subject_user_id:
+        return False
+
+    kind = str(system_event.get("kind") or "").strip()
+    status_map = {
+        "member_joined": "active",
+        "member_left": "left",
+        "member_kicked": "kicked",
+    }
+    status = status_map.get(kind)
+    if status is None:
+        return False
+
+    upsert_group_member(
+        conn,
+        owner_did=owner_did,
+        group_id=group_id,
+        user_id=subject_user_id,
+        member_did=subject.get("did"),
+        member_handle=subject.get("handle"),
+        profile_url=subject.get("profile_url"),
+        role="member",
+        status=status,
+        credential_name=credential_name,
+        metadata={"system_event": system_event},
+    )
+    active_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM group_members
+        WHERE owner_did = ? AND group_id = ? AND status = 'active'
+        """,
+        (_normalize_owner_did(owner_did), group_id),
+    ).fetchone()[0]
+    upsert_group(
+        conn,
+        owner_did=owner_did,
+        group_id=group_id,
+        member_count=int(active_count),
+        credential_name=credential_name,
+    )
+    return True
 
 
 def delete_group_members(
@@ -1767,9 +1941,9 @@ def rebind_owner_did(
     conn.execute(
         """
         INSERT OR REPLACE INTO group_members
-        (owner_did, group_id, user_id, member_did, member_handle, role, status,
-         joined_at, sent_message_count, last_synced_at, metadata, credential_name)
-        SELECT ?, group_id, user_id, member_did, member_handle, role, status,
+        (owner_did, group_id, user_id, member_did, member_handle, profile_url, role,
+         status, joined_at, sent_message_count, last_synced_at, metadata, credential_name)
+        SELECT ?, group_id, user_id, member_did, member_handle, profile_url, role, status,
                joined_at, sent_message_count, last_synced_at, metadata, credential_name
         FROM group_members
         WHERE owner_did = ?
@@ -1862,7 +2036,9 @@ __all__ = [
     "set_e2ee_outbox_failure_by_id",
     "store_message",
     "store_messages_batch",
+    "sync_group_member_from_system_event",
     "update_e2ee_outbox_status",
     "upsert_contact",
+    "upsert_group_member",
     "upsert_group",
 ]
