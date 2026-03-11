@@ -126,6 +126,52 @@ def test_summarize_inbox_hides_protocol_messages_from_user_output(
     ]
 
 
+def test_check_identity_bootstraps_missing_jwt_via_did_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Identity status should stay OK when a missing JWT is re-issued automatically."""
+    credential_data = {
+        "did": "did:alice",
+        "name": "Alice",
+        "jwt_token": None,
+    }
+
+    async def _fake_authenticated_rpc_call(
+        client,
+        endpoint: str,
+        method: str,
+        params: dict[str, Any] | None = None,
+        request_id: int | str = 1,
+        *,
+        auth: Any,
+        credential_name: str,
+    ) -> dict[str, Any]:
+        del client, endpoint, method, params, request_id, auth, credential_name
+        credential_data["jwt_token"] = "jwt-new"
+        return {"did": "did:alice", "name": "Alice"}
+
+    monkeypatch.setattr(check_status, "load_identity", lambda credential_name: dict(credential_data))
+    monkeypatch.setattr(
+        check_status, "create_authenticator", lambda credential_name, config: (
+            object(),
+            dict(credential_data),
+        )
+    )
+    monkeypatch.setattr(
+        check_status, "create_user_service_client", lambda config: _DummyAsyncClient()
+    )
+    monkeypatch.setattr(
+        check_status, "authenticated_rpc_call", _fake_authenticated_rpc_call
+    )
+
+    result = asyncio.run(check_status.check_identity("alice"))
+
+    assert result["status"] == "ok"
+    assert result["jwt_valid"] is True
+    assert result["jwt_refreshed"] is True
+    assert credential_data["jwt_token"] == "jwt-new"
+
+
 def test_auto_e2ee_builds_plaintext_inbox_report(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

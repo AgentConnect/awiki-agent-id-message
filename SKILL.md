@@ -152,7 +152,6 @@ Parse its JSON output and act:
 | Condition | Action |
 |-----------|--------|
 | `identity.status == "no_identity"` | Guide identity creation |
-| `identity.status == "no_jwt"` | Refresh JWT |
 | `len(inbox.messages) > 0` | Notify unread messages; decrypted E2EE messages already appear as plaintext with an encrypted-message notice |
 | `group_watch.active_groups > 0` | Follow group-watch policy |
 | Other | Silent |

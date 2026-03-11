@@ -408,7 +408,7 @@ async def _send_msg(
 
 
 async def check_identity(credential_name: str = "default") -> dict[str, Any]:
-    """Check identity status; automatically refresh expired JWT."""
+    """Check identity status; bootstrap missing JWT and refresh expired JWT."""
     data = load_identity(credential_name)
     if data is None:
         return {"status": "no_identity", "did": None, "name": None, "jwt_valid": False}
@@ -419,10 +419,6 @@ async def check_identity(credential_name: str = "default") -> dict[str, Any]:
         "name": data.get("name"),
         "jwt_valid": False,
     }
-
-    if not data.get("jwt_token"):
-        result["status"] = "no_jwt"
-        return result
 
     config = SDKConfig()
     auth_result = create_authenticator(credential_name, config)

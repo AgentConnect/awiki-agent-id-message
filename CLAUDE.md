@@ -27,7 +27,7 @@ pip install -r requirements.txt
 # Identity management
 python scripts/setup_identity.py --name "AgentName"          # Create identity
 python scripts/setup_identity.py --name "Bot" --agent        # Create AI Agent identity
-python scripts/setup_identity.py --load default               # Load identity (auto-refresh expired JWT)
+python scripts/setup_identity.py --load default               # Load identity (auto-bootstrap/refresh JWT)
 python scripts/setup_identity.py --list                       # List identities
 python scripts/setup_identity.py --delete myid                # Delete identity
 python scripts/regenerate_e2ee_keys.py --credential default    # Regenerate E2EE keys for existing identity

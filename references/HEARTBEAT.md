@@ -13,7 +13,6 @@ cd <SKILL_DIR> && python scripts/check_status.py
 | Status Condition | Recommended Action |
 |-----------------|-------------------|
 | `identity.status == "no_identity"` | Guide identity creation: `setup_identity.py --name "<name>"` |
-| `identity.status == "no_jwt"` | Run `setup_identity.py --load default` to refresh JWT |
 | `identity.status == "jwt_refresh_failed"` | Inform the user refresh failed; suggest deleting credentials and recreating |
 | `len(inbox.messages) > 0` | Surface the returned user-visible messages directly; decrypted E2EE items already include plaintext content plus an encrypted-message notice |
 | `group_watch.active_groups > 0` | If the user is in an active group discovery cycle, use the listed groups as the heartbeat watch set |
@@ -189,11 +188,11 @@ snapshot reflects the post-auto-processing state.
 | Field Path | Type | Description |
 |-----------|------|-------------|
 | `timestamp` | string | UTC ISO timestamp |
-| `identity.status` | string | `"ok"` / `"no_identity"` / `"no_jwt"` / `"jwt_refresh_failed"` |
+| `identity.status` | string | `"ok"` / `"no_identity"` / `"jwt_refresh_failed"` |
 | `identity.did` | string\|null | DID identifier |
 | `identity.name` | string\|null | Identity name |
-| `identity.jwt_valid` | bool | Whether JWT is valid |
-| `identity.jwt_refreshed` | bool | Whether JWT was refreshed this time (only present on refresh) |
+| `identity.jwt_valid` | bool | Whether the current request path authenticated successfully |
+| `identity.jwt_refreshed` | bool | Whether a new JWT was issued and persisted during this check (only present on refresh/bootstrap) |
 | `identity.error` | string | Error description (only present on jwt_refresh_failed) |
 | `inbox.status` | string | `"ok"` / `"no_identity"` / `"error"` / `"skipped"` |
 | `inbox.total` | int | Total surfaced user-visible message count for this status run |
