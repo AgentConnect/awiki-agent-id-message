@@ -16,7 +16,7 @@ cd <SKILL_DIR> && python scripts/check_status.py
 | `identity.status == "no_jwt"` | Run `setup_identity.py --load default` to refresh JWT |
 | `identity.status == "jwt_refresh_failed"` | Inform the user refresh failed; suggest deleting credentials and recreating |
 | `inbox.text_messages > 0` | Display message summary; prompt user to review |
-| `len(inbox.e2ee_encrypted_from) > 0` | Inform the user there are unread encrypted messages; use `e2ee_messaging.py --process --peer <DID>` or the WebSocket listener to decrypt |
+| `len(inbox.e2ee_encrypted_from) > 0` | Inform the user there are unread encrypted messages; use `check_inbox.py`, `check_inbox.py --history`, or `e2ee_messaging.py --process --peer <DID>` as needed |
 | `inbox.has_pending_handshakes == true` | Inform the user there are still pending E2EE handshake requests |
 | `e2ee_auto.processed > 0` | Report auto-processing results |
 | `group_watch.active_groups > 0` | If the user is in an active group discovery cycle, use the listed groups as the heartbeat watch set |
@@ -40,7 +40,7 @@ E2EE auto-processing: automatically accepted encrypted communication request fro
 If unread encrypted messages remain:
 ```
 Unread encrypted messages from: [DID, DID...]
-Use `e2ee_messaging.py --process --peer <DID>` now, or rely on the WebSocket listener for transparent decryption.
+Use `e2ee_messaging.py --process --peer <DID>` to decrypt.
 ```
 
 ### Step 4: Check Profile Completeness
@@ -157,7 +157,7 @@ During this phase:
 - it is safe to record recommendation events automatically
 - do **not** save contacts, follow, DM, or post to the group without explicit user confirmation
 - if candidate inspection needs profile refresh, use the standard profile lookup
-  flow described in `SKILL.md` or `GROUP_RELATIONSHIP_PLAYBOOK.md`
+  flow described in `SKILL.md` or `GROUP_DISCOVERY_GUIDE.md`
 
 ### Silent Judgment Rules
 
@@ -193,7 +193,7 @@ Only notify the user when any of the following are true; otherwise, remain compl
 **Do not auto-execute (requires user instruction):**
 - Initiating handshakes, sending encrypted messages, decrypting messages
 
-**Important note:** `check_status.py` auto-processes E2EE protocol messages by default. It does **not** decrypt unread `e2ee_msg` content into plaintext. For actual plaintext delivery, use `e2ee_messaging.py --process --peer <DID>` or run the WebSocket listener. Use `--no-auto-e2ee` only when you explicitly want to disable this behavior.
+**Important note:** `check_status.py` auto-processes E2EE protocol messages by default. It does **not** decrypt unread `e2ee_msg` content into plaintext. For actual plaintext delivery, use `e2ee_messaging.py --process --peer <DID>`. Use `--no-auto-e2ee` only when you explicitly want to disable this behavior.
 
 **Design rationale:** The E2EE protocol has no rejection mechanism, and handshake messages expire after 5 minutes. Auto-accepting avoids timeouts; notifying the user maintains transparency.
 
@@ -217,7 +217,7 @@ snapshot reflects the post-auto-processing state.
 | `inbox.text_by_sender` | object | `{did: {count: int, latest: string}}` |
 | `inbox.has_pending_handshakes` | bool | Whether there are pending E2EE handshakes |
 | `inbox.e2ee_handshake_pending` | list | List of DIDs that initiated handshakes |
-| `inbox.e2ee_encrypted_from` | list | List of DIDs that sent unread encrypted messages which still require `--process` or WebSocket listener decryption |
+| `inbox.e2ee_encrypted_from` | list | List of DIDs that sent unread encrypted messages which still require `--process` decryption |
 | `inbox.by_type` | object | Count by message type `{type: count}` |
 | `group_watch.status` | string | `"ok"` / `"no_identity"` / `"error"` / `"skipped"` |
 | `group_watch.active_groups` | int | Number of locally tracked active discovery groups |

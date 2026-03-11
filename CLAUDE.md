@@ -197,7 +197,7 @@ When modifying code logic, the corresponding file's `[INPUT]/[OUTPUT]/[POS]` hea
 - All network operations must use async/await (httpx AsyncClient)
 - `.credentials/` directory must remain gitignored, credentials stored at `~/.openclaw/credentials/awiki-agent-id-message/`
 - `.data/` directory must remain gitignored, data stored at `~/.openclaw/workspace/data/awiki-agent-id-message/`
-- API and support reference documents are in the `references/` directory (RULES.md, HEARTBEAT.md, PROFILE_TEMPLATE.md, WEBSOCKET_LISTENER.md, GROUP_RELATIONSHIP_PLAYBOOK.md, GROUP_RECOMMENDATION_PROMPTS.md, e2ee-protocol.md, local-store-schema.md, UPGRADE_NOTES.md)
+- API and support reference documents are in the `references/` directory (RULES.md, HEARTBEAT.md, PROFILE_TEMPLATE.md, WEBSOCKET_LISTENER.md, GROUP_DISCOVERY_GUIDE.md, e2ee-protocol.md, local-store-schema.md, UPGRADE_NOTES.md, WHY_AWIKI.md, SKILL_zh.md)
 
 ## Environment Variables
 
