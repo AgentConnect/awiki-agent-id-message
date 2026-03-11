@@ -324,8 +324,8 @@ def summarize_group_watch(owner_did: str | None) -> dict[str, Any]:
                         "last_recommended_at": recommendation_row["last_recommended_at"],
                         "saved_contacts": int(saved_contact_row["cnt"] or 0),
                         "recommendation_signal_ready": (
-                            tracked_active_members >= 5
-                            or local_group_user_messages >= 5
+                            tracked_active_members >= 1
+                            or local_group_user_messages >= 1
                         ),
                         "last_synced_seq": row["last_synced_seq"],
                         "last_read_seq": row["last_read_seq"],

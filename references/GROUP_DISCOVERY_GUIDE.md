@@ -96,8 +96,6 @@ Before presenting any recommendation, verify:
 - the person is not already over-handled locally
 - the final user question is explicit and easy to answer
 
-## Minimum Signal Threshold
+## Recommendation Criterion
 
-Do not proactively recommend until at least:
-- 5 group members, or
-- 5 group user messages
+Recommend whenever a member shows potential as a valuable connection for the user — based on Profile, self-introduction content, or group activity signals. There is no minimum member count or message count threshold.

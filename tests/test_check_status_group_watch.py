@@ -200,6 +200,15 @@ def test_check_status_includes_group_watch_summary(
     )
     monkeypatch.setattr(check_status, "load_e2ee_state", lambda credential_name: None)
 
+    async def _fake_fetch_group_messages(
+        group_watch, *, owner_did, credential_name
+    ):
+        return {"fetched_groups": 0, "total_new_messages": 0, "errors": []}
+
+    monkeypatch.setattr(
+        check_status, "fetch_group_messages", _fake_fetch_group_messages
+    )
+
     report = asyncio.run(check_status.check_status("alice"))
 
     assert report["group_watch"]["status"] == "ok"

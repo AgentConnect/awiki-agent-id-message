@@ -236,7 +236,7 @@ snapshot reflects the post-auto-processing state.
 | `group_watch.groups[].pending_recommendations` | int | Pending `ai_recommended` events for this group |
 | `group_watch.groups[].last_recommended_at` | string\|null | Latest local recommendation event timestamp |
 | `group_watch.groups[].saved_contacts` | int | Contacts already confirmed from this group |
-| `group_watch.groups[].recommendation_signal_ready` | bool | Whether the local snapshot already meets the default recommendation threshold |
+| `group_watch.groups[].recommendation_signal_ready` | bool | Whether the group has any members or messages available for recommendation |
 | `group_watch.groups[].last_synced_seq` | int\|null | Last locally synced group message sequence; use it as the next incremental `--since-seq` cursor |
 | `group_watch.groups[].last_read_seq` | int\|null | Last locally tracked read sequence |
 | `group_watch.groups[].last_message_at` | string\|null | Latest known group message timestamp |
