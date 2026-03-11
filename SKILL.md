@@ -153,9 +153,7 @@ Parse its JSON output and act:
 |-----------|--------|
 | `identity.status == "no_identity"` | Guide identity creation |
 | `identity.status == "no_jwt"` | Refresh JWT |
-| `inbox.text_messages > 0` | Notify unread messages |
-| `inbox.e2ee_encrypted_from` non-empty | Notify encrypted messages still exist after auto-processing; use `check_inbox.py`, `check_inbox.py --history`, or `e2ee_messaging.py --process --peer <DID>` as needed |
-| `e2ee_auto.processed > 0` | Notify auto-processed handshakes |
+| `len(inbox.messages) > 0` | Notify unread messages; decrypted E2EE messages already appear as plaintext with an encrypted-message notice |
 | `group_watch.active_groups > 0` | Follow group-watch policy |
 | Other | Silent |
 
@@ -254,7 +252,7 @@ cd <SKILL_DIR> && python scripts/e2ee_messaging.py --drop <outbox_id>
 
 ### Immediate Plaintext Rendering
 
-- `check_status.py` **defaults to E2EE auto-processing** (init/ack/rekey/error)
+- `check_status.py` **defaults to E2EE auto-processing** and surfaces decrypted plaintext for unread `e2ee_msg` items when possible
 - `check_inbox.py` immediately processes protocol messages
 - `check_inbox.py --history` does the same and tries to show plaintext directly
 

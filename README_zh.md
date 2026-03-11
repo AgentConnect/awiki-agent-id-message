@@ -145,8 +145,8 @@ python3 scripts/e2ee_messaging.py --handshake "did:wba:awiki.ai:user:bob"
 ```
 
 E2EE 会话状态会自动持久化，可跨会话复用。
-`check_inbox.py`、`check_status.py` 和 WebSocket 监听器都可以自动处理 E2EE
-协议消息，因此手动 `--process` 主要用于恢复或调试。
+`check_inbox.py` 和 `check_status.py` 会在可能时自动处理 E2EE 协议消息并返回解密后的明文；
+WebSocket 监听器也会在转发前完成解密。因此手动 `--process` 主要用于恢复或调试。
 
 ### 发现型群组
 
