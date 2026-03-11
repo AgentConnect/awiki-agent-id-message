@@ -148,12 +148,27 @@ During this phase:
 - if candidate inspection needs profile refresh, use the standard profile lookup
   flow described in `SKILL.md` or `GROUP_DISCOVERY_GUIDE.md`
 
+### Group Message Processing
+
+`check_status.py` now fetches incremental group messages for all active groups
+and attaches classified `new_messages` to each group entry. The Agent should
+process them in priority order:
+
+| Priority | Message Type | Field | Agent Behavior |
+|----------|-------------|-------|---------------|
+| 1 | member_joined | `new_messages.member_joined[]` | Check `system_event.subject.profile_url`; fetch Profile via `get_profile.py --handle <handle>` to analyze the member. Evaluate fit. For valuable candidates, run recommendation steps 6-9 |
+| 2 | text (group_user) | `new_messages.text[]` | Typically self-introductions posted after joining (guided by group `message_prompt`). Analyze content, evaluate whether the sender is a valuable connection. If yes, fetch their Profile and run recommendation steps 6-9 |
+| 3 | member_left / member_kicked | `new_messages.member_left/kicked[]` | Update local awareness. No proactive action needed |
+
+When `new_messages.total == 0` for a group, skip it entirely — no signal, no action.
+
 ### Silent Judgment Rules
 
 Only notify the user when any of the following are true; otherwise, remain completely silent:
 - `len(inbox.messages) > 0`
 - `identity.jwt_refreshed == true`
 - `identity.status != "ok"`
+- any watched group has `new_messages.total > 0`
 - a watched group has new joined members
 - a watched group has new owner messages
 - a watched group now has strong enough signal for fresh recommendations
@@ -226,4 +241,15 @@ snapshot reflects the post-auto-processing state.
 | `group_watch.groups[].last_read_seq` | int\|null | Last locally tracked read sequence |
 | `group_watch.groups[].last_message_at` | string\|null | Latest known group message timestamp |
 | `group_watch.groups[].stored_at` | string | Timestamp of the local group snapshot update |
+| `group_watch.groups[].new_messages` | object | Classified incremental messages fetched for this group (present only when fetch runs) |
+| `group_watch.groups[].new_messages.total` | int | Total number of new messages fetched in this heartbeat |
+| `group_watch.groups[].new_messages.text` | list | User-authored text messages (`group_user` type) |
+| `group_watch.groups[].new_messages.member_joined` | list | System events for members joining the group |
+| `group_watch.groups[].new_messages.member_left` | list | System events for members leaving the group |
+| `group_watch.groups[].new_messages.member_kicked` | list | System events for members being kicked |
+| `group_watch.groups[].new_messages.error` | string | Error description if fetch failed for this group (only present on failure) |
+| `group_watch.fetch_summary` | object | Aggregate fetch result across all groups (present only when fetch runs) |
+| `group_watch.fetch_summary.fetched_groups` | int | Number of groups for which message fetch was attempted |
+| `group_watch.fetch_summary.total_new_messages` | int | Sum of new messages across all groups |
+| `group_watch.fetch_summary.errors` | list | Per-group error descriptions (empty list when all succeed) |
 | `e2ee_sessions.active` | int | Active E2EE session count |

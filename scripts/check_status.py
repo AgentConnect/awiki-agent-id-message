@@ -9,12 +9,14 @@ Usage:
          e2ee_store, credential_migration, database_migration, local_store,
          logging_config
 [OUTPUT]: Structured JSON status report (local upgrade + identity + inbox +
-          group_watch + e2ee_sessions), with automatic E2EE protocol handling
-          and plaintext delivery for unread encrypted messages
+          group_watch + e2ee_sessions), with automatic E2EE protocol handling,
+          plaintext delivery for unread encrypted messages, and incremental
+          group message fetching with classification (text / member events)
 [POS]: Unified status check entry point for Agent session startup and heartbeat calls
        with mandatory, server_seq-aware E2EE auto-processing, plaintext
-       delivery for unread encrypted messages, and local discovery-group watch
-       summaries
+       delivery for unread encrypted messages, local discovery-group watch
+       summaries, and incremental group message fetching with per-group
+       new_messages classification
 
 [PROTOCOL]:
 1. Update this header when logic changes
@@ -31,6 +33,7 @@ from typing import Any
 from utils import (
     SDKConfig,
     E2eeClient,
+    rpc_call,
     create_user_service_client,
     create_molt_message_client,
     authenticated_rpc_call,
@@ -51,6 +54,9 @@ from e2ee_outbox import record_remote_failure
 
 MESSAGE_RPC = "/message/rpc"
 AUTH_RPC = "/user-service/did-auth/rpc"
+GROUP_RPC_ENDPOINT = "/group/rpc"
+PROFILE_RPC = "/user-service/did/profile/rpc"
+_GROUP_MSG_FETCH_LIMIT = 50
 logger = logging.getLogger(__name__)
 
 # E2EE protocol message types
@@ -345,6 +351,282 @@ def summarize_group_watch(owner_did: str | None) -> dict[str, Any]:
             "groups": [],
             "error": str(exc),
         }
+
+
+# ---------- Group message helpers ----------
+
+
+def _classify_group_messages(
+    messages: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Classify group messages into text / member_joined / member_left / member_kicked buckets."""
+    buckets: dict[str, list[dict[str, Any]]] = {
+        "text": [],
+        "member_joined": [],
+        "member_left": [],
+        "member_kicked": [],
+    }
+    for msg in messages:
+        content_type = msg.get("type") or msg.get("content_type") or ""
+        system_event = msg.get("system_event")
+        if isinstance(system_event, dict):
+            kind = system_event.get("kind", "")
+            if kind in buckets:
+                buckets[kind].append(msg)
+                continue
+        if content_type in ("group_user", "text"):
+            buckets["text"].append(msg)
+    return buckets
+
+
+def _persist_and_classify_group_messages(
+    *,
+    owner_did: str,
+    group_id: str,
+    payload: dict[str, Any],
+    credential_name: str,
+) -> dict[str, Any]:
+    """Persist fetched group messages and return classified buckets.
+
+    Reuses the persistence logic from manage_group._persist_group_messages():
+    store_messages_batch + sync_group_member_from_system_event + upsert_group.
+    """
+    messages = payload.get("messages", [])
+    if not messages:
+        return {
+            "total": 0,
+            "text": [],
+            "member_joined": [],
+            "member_left": [],
+            "member_kicked": [],
+        }
+
+    batch: list[dict[str, Any]] = []
+    max_server_seq: int | None = None
+    last_message_at: str | None = None
+    for msg in messages:
+        sender_did = str(msg.get("sender_did") or "")
+        direction = 1 if sender_did and sender_did == owner_did else 0
+        sent_at = msg.get("sent_at") or msg.get("created_at")
+        server_seq = msg.get("server_seq")
+        if isinstance(server_seq, int):
+            max_server_seq = (
+                server_seq if max_server_seq is None else max(max_server_seq, server_seq)
+            )
+        if sent_at:
+            last_message_at = str(sent_at)
+        batch.append(
+            {
+                "msg_id": msg.get("id", ""),
+                "thread_id": local_store.make_thread_id(owner_did, group_id=group_id),
+                "direction": direction,
+                "sender_did": sender_did,
+                "receiver_did": None,
+                "group_id": group_id,
+                "group_did": msg.get("group_did"),
+                "content_type": msg.get("type", "group_user"),
+                "content": str(msg.get("content", "")),
+                "title": msg.get("title"),
+                "server_seq": server_seq,
+                "sent_at": sent_at,
+                "sender_name": msg.get("sender_name"),
+                "metadata": (
+                    json.dumps(
+                        {"system_event": msg.get("system_event")},
+                        ensure_ascii=False,
+                    )
+                    if msg.get("system_event") is not None
+                    else None
+                ),
+                "credential_name": credential_name,
+                "owner_did": owner_did,
+            }
+        )
+
+    conn = local_store.get_connection()
+    try:
+        local_store.ensure_schema(conn)
+        local_store.store_messages_batch(
+            conn, batch, owner_did=owner_did, credential_name=credential_name
+        )
+        for msg in messages:
+            system_event = msg.get("system_event")
+            if not isinstance(system_event, dict):
+                continue
+            local_store.sync_group_member_from_system_event(
+                conn,
+                owner_did=owner_did,
+                group_id=group_id,
+                system_event=system_event,
+                credential_name=credential_name,
+            )
+        local_store.upsert_group(
+            conn,
+            owner_did=owner_did,
+            group_id=group_id,
+            membership_status="active",
+            last_synced_seq=payload.get("next_since_seq") or max_server_seq,
+            last_message_at=last_message_at,
+            credential_name=credential_name,
+        )
+    finally:
+        conn.close()
+
+    classified = _classify_group_messages(messages)
+    classified["total"] = len(messages)
+    return classified
+
+
+async def _fetch_one_group_messages(
+    client,
+    *,
+    group_id: str,
+    since_seq: int | None,
+    owner_did: str,
+    credential_name: str,
+    auth,
+) -> dict[str, Any]:
+    """Fetch incremental messages for one group and return classified results.
+
+    Returns empty result on error rather than raising.
+    """
+    empty: dict[str, Any] = {
+        "total": 0,
+        "text": [],
+        "member_joined": [],
+        "member_left": [],
+        "member_kicked": [],
+    }
+    try:
+        params: dict[str, Any] = {
+            "group_id": group_id,
+            "limit": _GROUP_MSG_FETCH_LIMIT,
+        }
+        if since_seq is not None:
+            params["since_seq"] = since_seq
+        payload = await authenticated_rpc_call(
+            client,
+            GROUP_RPC_ENDPOINT,
+            "list_messages",
+            params,
+            auth=auth,
+            credential_name=credential_name,
+        )
+        return _persist_and_classify_group_messages(
+            owner_did=owner_did,
+            group_id=group_id,
+            payload=payload,
+            credential_name=credential_name,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Failed to fetch group messages group_id=%s error=%s", group_id, exc
+        )
+        return {**empty, "error": str(exc)}
+
+
+async def fetch_group_messages(
+    group_watch: dict[str, Any],
+    *,
+    owner_did: str,
+    credential_name: str,
+) -> dict[str, Any]:
+    """Fetch incremental messages for all active groups in the watch set.
+
+    Coordinates parallel fetches via asyncio.gather, then best-effort resolves
+    missing profile_url for member_joined events.
+    """
+    groups = group_watch.get("groups", [])
+    if not groups:
+        return {"fetched_groups": 0, "total_new_messages": 0, "errors": []}
+
+    config = SDKConfig()
+    auth_result = create_authenticator(credential_name, config)
+    if auth_result is None:
+        return {
+            "fetched_groups": 0,
+            "total_new_messages": 0,
+            "errors": ["no_authenticator"],
+        }
+
+    auth, _ = auth_result
+
+    async with create_user_service_client(config) as client:
+        # Parallel fetch for all groups
+        tasks = []
+        for group in groups:
+            tasks.append(
+                _fetch_one_group_messages(
+                    client,
+                    group_id=group["group_id"],
+                    since_seq=group.get("last_synced_seq"),
+                    owner_did=owner_did,
+                    credential_name=credential_name,
+                    auth=auth,
+                )
+            )
+        results = await asyncio.gather(*tasks)
+
+        # Attach results to group entries and collect profile backfill targets
+        errors: list[str] = []
+        total_new = 0
+        profile_backfill: list[tuple[str, dict[str, Any]]] = []
+
+        for group, result in zip(groups, results):
+            if "error" in result:
+                errors.append(f"{group['group_id']}: {result['error']}")
+            total_new += result.get("total", 0)
+            group["new_messages"] = result
+
+            # Collect member_joined events missing profile_url
+            for event in result.get("member_joined", []):
+                se = event.get("system_event", {})
+                subject = se.get("subject", {})
+                if subject.get("handle") and not subject.get("profile_url"):
+                    profile_backfill.append((group["group_id"], event))
+
+        # Best-effort profile_url backfill for new members
+        for group_id, event in profile_backfill:
+            se = event.get("system_event", {})
+            subject = se.get("subject", {})
+            handle = subject.get("handle", "")
+            local_part = handle.split(".")[0] if "." in handle else handle
+            if not local_part:
+                continue
+            try:
+                profile = await rpc_call(
+                    client,
+                    PROFILE_RPC,
+                    "get_public_profile",
+                    {"handle": local_part},
+                )
+                profile_url = profile.get("profile_url")
+                if profile_url:
+                    subject["profile_url"] = profile_url
+                    # Update local member cache
+                    user_id = se.get("subject", {}).get("user_id", "")
+                    if user_id:
+                        conn = local_store.get_connection()
+                        try:
+                            local_store.ensure_schema(conn)
+                            local_store.upsert_group_member(
+                                conn,
+                                owner_did=owner_did,
+                                group_id=group_id,
+                                user_id=user_id,
+                                profile_url=profile_url,
+                                credential_name=credential_name,
+                            )
+                        finally:
+                            conn.close()
+            except Exception:  # noqa: BLE001
+                pass  # best-effort, silently ignore
+
+    return {
+        "fetched_groups": len(groups),
+        "total_new_messages": total_new,
+        "errors": errors,
+    }
 
 
 # ---------- E2EE helpers ----------
@@ -728,7 +1010,20 @@ async def check_status(
         return report
 
     # 2. Local discovery-group watch summary
-    report["group_watch"] = summarize_group_watch(report["identity"].get("did"))
+    owner_did = report["identity"].get("did")
+    report["group_watch"] = summarize_group_watch(owner_did)
+
+    # 2b. Fetch incremental group messages for active groups
+    if (
+        report["group_watch"].get("status") == "ok"
+        and report["group_watch"].get("active_groups", 0) > 0
+        and owner_did
+    ):
+        report["group_watch"]["fetch_summary"] = await fetch_group_messages(
+            report["group_watch"],
+            owner_did=owner_did,
+            credential_name=credential_name,
+        )
 
     # 3. Inbox summary / delivery
     report["inbox"] = await _build_inbox_report_with_auto_e2ee(credential_name)
