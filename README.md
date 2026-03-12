@@ -146,8 +146,10 @@ python3 scripts/e2ee_messaging.py --handshake "did:wba:awiki.ai:user:bob"
 ```
 
 E2EE session state is automatically persisted and can be reused across sessions.
-`check_inbox.py`, `check_status.py`, and the WebSocket listener can auto-process
-E2EE protocol messages, so manual `--process` is mainly for recovery or debugging.
+`check_inbox.py` and `check_status.py` can auto-process E2EE protocol messages
+and surface decrypted plaintext when possible; the WebSocket listener can also
+decrypt before forwarding. Manual `--process` is mainly for recovery or
+debugging.
 
 ### Discovery Groups
 

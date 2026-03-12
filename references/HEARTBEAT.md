@@ -13,12 +13,8 @@ cd <SKILL_DIR> && python scripts/check_status.py
 | Status Condition | Recommended Action |
 |-----------------|-------------------|
 | `identity.status == "no_identity"` | Guide identity creation: `setup_identity.py --name "<name>"` |
-| `identity.status == "no_jwt"` | Run `setup_identity.py --load default` to refresh JWT |
 | `identity.status == "jwt_refresh_failed"` | Inform the user refresh failed; suggest deleting credentials and recreating |
-| `inbox.text_messages > 0` | Display message summary; prompt user to review |
-| `len(inbox.e2ee_encrypted_from) > 0` | Inform the user there are unread encrypted messages; use `e2ee_messaging.py --process --peer <DID>` or the WebSocket listener to decrypt |
-| `inbox.has_pending_handshakes == true` | Inform the user there are still pending E2EE handshake requests |
-| `e2ee_auto.processed > 0` | Report auto-processing results |
+| `len(inbox.messages) > 0` | Surface the returned user-visible messages directly; decrypted E2EE items already include plaintext content plus an encrypted-message notice |
 | `group_watch.active_groups > 0` | If the user is in an active group discovery cycle, use the listed groups as the heartbeat watch set |
 | All normal | "DID identity OK, no unread messages." |
 
@@ -26,21 +22,14 @@ cd <SKILL_DIR> && python scripts/check_status.py
 
 ```
 DID identity status: [name] ([DID abbreviated]) - JWT valid/refreshed
-Inbox: [N] unread messages
+Inbox: [N] surfaced messages
   - [sender]: [count] messages (latest: [time])
-E2EE: [active] active / [pending] handshaking
 Discovery groups: [N] locally tracked active groups
 ```
 
-If E2EE auto-processing occurred:
+If decrypted E2EE messages were surfaced:
 ```
-E2EE auto-processing: automatically accepted encrypted communication request from [DID]
-```
-
-If unread encrypted messages remain:
-```
-Unread encrypted messages from: [DID, DID...]
-Use `e2ee_messaging.py --process --peer <DID>` now, or rely on the WebSocket listener for transparent decryption.
+Encrypted message from [DID]: [plaintext shown with encrypted-message notice]
 ```
 
 ### Step 4: Check Profile Completeness
@@ -157,16 +146,29 @@ During this phase:
 - it is safe to record recommendation events automatically
 - do **not** save contacts, follow, DM, or post to the group without explicit user confirmation
 - if candidate inspection needs profile refresh, use the standard profile lookup
-  flow described in `SKILL.md` or `GROUP_RELATIONSHIP_PLAYBOOK.md`
+  flow described in `SKILL.md` or `GROUP_DISCOVERY_GUIDE.md`
+
+### Group Message Processing
+
+`check_status.py` now fetches incremental group messages for all active groups
+and attaches classified `new_messages` to each group entry. The Agent should
+process them in priority order:
+
+| Priority | Message Type | Field | Agent Behavior |
+|----------|-------------|-------|---------------|
+| 1 | member_joined | `new_messages.member_joined[]` | Check `system_event.subject.profile_url`; fetch Profile via `get_profile.py --handle <handle>` to analyze the member. Evaluate fit. For valuable candidates, run recommendation steps 6-9 |
+| 2 | text (group_user) | `new_messages.text[]` | Typically self-introductions posted after joining (guided by group `message_prompt`). Analyze content, evaluate whether the sender is a valuable connection. If yes, fetch their Profile and run recommendation steps 6-9 |
+| 3 | member_left / member_kicked | `new_messages.member_left/kicked[]` | Update local awareness. No proactive action needed |
+
+When `new_messages.total == 0` for a group, skip it entirely — no signal, no action.
 
 ### Silent Judgment Rules
 
 Only notify the user when any of the following are true; otherwise, remain completely silent:
-- `inbox.text_messages > 0`
-- `len(inbox.e2ee_encrypted_from) > 0`
-- `e2ee_auto.processed > 0`
+- `len(inbox.messages) > 0`
 - `identity.jwt_refreshed == true`
 - `identity.status != "ok"`
+- any watched group has `new_messages.total > 0`
 - a watched group has new joined members
 - a watched group has new owner messages
 - a watched group now has strong enough signal for fresh recommendations
@@ -186,14 +188,10 @@ Only notify the user when any of the following are true; otherwise, remain compl
 - `e2ee_rekey` → refresh the session
 - `e2ee_error` → log the error / allow follow-up re-handshake logic
 
-**Notify user:**
-- "Automatically accepted encrypted communication request from [DID]"
-- "E2EE channel with [DID] has been established"
-
 **Do not auto-execute (requires user instruction):**
-- Initiating handshakes, sending encrypted messages, decrypting messages
+- Initiating handshakes, sending encrypted messages
 
-**Important note:** `check_status.py` auto-processes E2EE protocol messages by default. It does **not** decrypt unread `e2ee_msg` content into plaintext. For actual plaintext delivery, use `e2ee_messaging.py --process --peer <DID>` or run the WebSocket listener. Use `--no-auto-e2ee` only when you explicitly want to disable this behavior.
+**Important note:** `check_status.py` auto-processes E2EE protocol messages by default and, when possible, decrypts unread `e2ee_msg` content into plaintext for the current heartbeat result. Returned decrypted items include an encrypted-message notice. This auto-processing is mandatory in the heartbeat path.
 
 **Design rationale:** The E2EE protocol has no rejection mechanism, and handshake messages expire after 5 minutes. Auto-accepting avoids timeouts; notifying the user maintains transparency.
 
@@ -205,20 +203,20 @@ snapshot reflects the post-auto-processing state.
 | Field Path | Type | Description |
 |-----------|------|-------------|
 | `timestamp` | string | UTC ISO timestamp |
-| `identity.status` | string | `"ok"` / `"no_identity"` / `"no_jwt"` / `"jwt_refresh_failed"` |
+| `identity.status` | string | `"ok"` / `"no_identity"` / `"jwt_refresh_failed"` |
 | `identity.did` | string\|null | DID identifier |
 | `identity.name` | string\|null | Identity name |
-| `identity.jwt_valid` | bool | Whether JWT is valid |
-| `identity.jwt_refreshed` | bool | Whether JWT was refreshed this time (only present on refresh) |
+| `identity.jwt_valid` | bool | Whether the current request path authenticated successfully |
+| `identity.jwt_refreshed` | bool | Whether a new JWT was issued and persisted during this check (only present on refresh/bootstrap) |
 | `identity.error` | string | Error description (only present on jwt_refresh_failed) |
 | `inbox.status` | string | `"ok"` / `"no_identity"` / `"error"` / `"skipped"` |
-| `inbox.total` | int | Total inbox message count |
-| `inbox.text_messages` | int | Plain text unread count (excluding E2EE protocol messages) |
+| `inbox.total` | int | Total surfaced user-visible message count for this status run |
+| `inbox.text_messages` | int | Surfaced plain-text message count (including decrypted E2EE text messages) |
 | `inbox.text_by_sender` | object | `{did: {count: int, latest: string}}` |
-| `inbox.has_pending_handshakes` | bool | Whether there are pending E2EE handshakes |
-| `inbox.e2ee_handshake_pending` | list | List of DIDs that initiated handshakes |
-| `inbox.e2ee_encrypted_from` | list | List of DIDs that sent unread encrypted messages which still require `--process` or WebSocket listener decryption |
 | `inbox.by_type` | object | Count by message type `{type: count}` |
+| `inbox.messages` | list | Most recent surfaced user-visible messages (max 10) |
+| `inbox.messages[].is_e2ee` | bool | Present and `true` when the message was decrypted from E2EE |
+| `inbox.messages[].e2ee_notice` | string | Present for decrypted E2EE messages to indicate the message was encrypted |
 | `group_watch.status` | string | `"ok"` / `"no_identity"` / `"error"` / `"skipped"` |
 | `group_watch.active_groups` | int | Number of locally tracked active discovery groups |
 | `group_watch.groups_with_pending_recommendations` | int | Number of active groups that still have pending `ai_recommended` events |
@@ -238,14 +236,20 @@ snapshot reflects the post-auto-processing state.
 | `group_watch.groups[].pending_recommendations` | int | Pending `ai_recommended` events for this group |
 | `group_watch.groups[].last_recommended_at` | string\|null | Latest local recommendation event timestamp |
 | `group_watch.groups[].saved_contacts` | int | Contacts already confirmed from this group |
-| `group_watch.groups[].recommendation_signal_ready` | bool | Whether the local snapshot already meets the default recommendation threshold |
+| `group_watch.groups[].recommendation_signal_ready` | bool | Whether the group has any members or messages available for recommendation |
 | `group_watch.groups[].last_synced_seq` | int\|null | Last locally synced group message sequence; use it as the next incremental `--since-seq` cursor |
 | `group_watch.groups[].last_read_seq` | int\|null | Last locally tracked read sequence |
 | `group_watch.groups[].last_message_at` | string\|null | Latest known group message timestamp |
 | `group_watch.groups[].stored_at` | string | Timestamp of the local group snapshot update |
-| `e2ee_auto.status` | string | `"ok"` / `"no_identity"` / `"error"` (present unless `--no-auto-e2ee` disables it) |
-| `e2ee_auto.processed` | int | Number auto-processed this time (present unless `--no-auto-e2ee` disables it) |
-| `e2ee_auto.details` | list | Processing details (present unless `--no-auto-e2ee` disables it) |
-| `e2ee_auto.error` | string | Error description (only when status is error) |
+| `group_watch.groups[].new_messages` | object | Classified incremental messages fetched for this group (present only when fetch runs) |
+| `group_watch.groups[].new_messages.total` | int | Total number of new messages fetched in this heartbeat |
+| `group_watch.groups[].new_messages.text` | list | User-authored text messages (`group_user` type) |
+| `group_watch.groups[].new_messages.member_joined` | list | System events for members joining the group |
+| `group_watch.groups[].new_messages.member_left` | list | System events for members leaving the group |
+| `group_watch.groups[].new_messages.member_kicked` | list | System events for members being kicked |
+| `group_watch.groups[].new_messages.error` | string | Error description if fetch failed for this group (only present on failure) |
+| `group_watch.fetch_summary` | object | Aggregate fetch result across all groups (present only when fetch runs) |
+| `group_watch.fetch_summary.fetched_groups` | int | Number of groups for which message fetch was attempted |
+| `group_watch.fetch_summary.total_new_messages` | int | Sum of new messages across all groups |
+| `group_watch.fetch_summary.errors` | list | Per-group error descriptions (empty list when all succeed) |
 | `e2ee_sessions.active` | int | Active E2EE session count |
-| `e2ee_sessions.pending` | int | Handshaking E2EE session count |

@@ -167,12 +167,25 @@ def test_check_status_includes_group_watch_summary(
             "jwt_valid": True,
         }
 
-    async def _fake_summarize_inbox(credential_name: str) -> dict[str, object]:
+    async def _fake_build_inbox_report_with_auto_e2ee(
+        credential_name: str,
+    ) -> dict[str, object]:
         del credential_name
-        return {"status": "ok", "total": 0, "text_messages": 0, "by_type": {}}
+        return {
+            "status": "ok",
+            "total": 0,
+            "text_messages": 0,
+            "by_type": {},
+            "text_by_sender": {},
+            "messages": [],
+        }
 
     monkeypatch.setattr(check_status, "check_identity", _fake_check_identity)
-    monkeypatch.setattr(check_status, "summarize_inbox", _fake_summarize_inbox)
+    monkeypatch.setattr(
+        check_status,
+        "_build_inbox_report_with_auto_e2ee",
+        _fake_build_inbox_report_with_auto_e2ee,
+    )
     monkeypatch.setattr(
         check_status,
         "summarize_group_watch",
@@ -187,7 +200,16 @@ def test_check_status_includes_group_watch_summary(
     )
     monkeypatch.setattr(check_status, "load_e2ee_state", lambda credential_name: None)
 
-    report = asyncio.run(check_status.check_status("alice", auto_e2ee=False))
+    async def _fake_fetch_group_messages(
+        group_watch, *, owner_did, credential_name
+    ):
+        return {"fetched_groups": 0, "total_new_messages": 0, "errors": []}
+
+    monkeypatch.setattr(
+        check_status, "fetch_group_messages", _fake_fetch_group_messages
+    )
+
+    report = asyncio.run(check_status.check_status("alice"))
 
     assert report["group_watch"]["status"] == "ok"
     assert report["group_watch"]["active_groups"] == 1
