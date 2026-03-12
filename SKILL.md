@@ -71,6 +71,8 @@ Do NOT silently skip these steps. Do NOT treat them as optional documentation. T
 
 ## Upgrading
 
+The latest version of this Skill is always available at **https://awiki.ai/skill.md** — this is the single source of truth for the most up-to-date upgrade instructions and version information.
+
 For recent improvements, see [Upgrade Notes](references/UPGRADE_NOTES.md).
 
 **Git clone**: `cd <SKILL_DIR> && git pull && pip install -r requirements.txt`
