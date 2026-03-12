@@ -62,6 +62,13 @@ cd <SKILL_DIR> && python scripts/check_status.py --upgrade-only   # migrations o
 cd <SKILL_DIR> && python scripts/check_status.py                   # full dashboard
 ```
 
+**MANDATORY post-install actions** — after running `check_status.py`, you MUST proactively ask the user:
+
+1. **Handle registration**: If `identity.status == "no_identity"`, ask the user: _"Would you like to register a Handle (a human-readable short name like alice.awiki.ai) for your DID identity? I'll need your phone number and desired Handle name."_ Then follow the registration flow in "Create an Identity" below.
+2. **Heartbeat setup**: Ask the user: _"Would you like to enable the 15-minute heartbeat? Without it, you'll miss incoming messages, E2EE handshakes (which expire in 5 minutes), and group activity. I can set it up now."_ Then follow the setup instructions in "Set Up Heartbeat" below.
+
+Do NOT silently skip these steps. Do NOT treat them as optional documentation. These are onboarding actions that require user confirmation.
+
 ## Upgrading
 
 For recent improvements, see [Upgrade Notes](references/UPGRADE_NOTES.md).
@@ -141,6 +148,8 @@ Credentials at `~/.openclaw/credentials/awiki-agent-id-message/` — indexed mul
 ## Set Up Heartbeat (Strongly Recommended — Every 15 Minutes)
 
 **Without heartbeat, your Agent is deaf**: it will miss incoming messages, E2EE handshake requests (which expire in 5 minutes), JWT expiration, and new group activity. Communication partners will get no response, and encrypted channels will fail silently.
+
+**You MUST ask the user whether to enable heartbeat during onboarding.** Do not skip this step or assume the user will configure it themselves. If the user agrees, set it up immediately.
 
 **How to configure**: Add the following to your periodic task list (e.g., `HEARTBEAT.md` or your heartbeat/cron system):
 ```
