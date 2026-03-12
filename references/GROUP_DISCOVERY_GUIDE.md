@@ -1,6 +1,6 @@
 # Group Discovery Guide
 
-Reference for group-based relationship discovery. This guide supplements the workflow defined in `SKILL.md` — it does NOT repeat the 9-step workflow, authorization model, or CLI commands already documented there.
+Reference for group-based relationship discovery. This guide supplements the workflow defined in `SKILL.md` — it does NOT repeat the two-phase post-join workflow, authorization model, or CLI commands already documented there.
 
 ## DM Composition Guidance
 

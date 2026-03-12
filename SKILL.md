@@ -351,6 +351,15 @@ cd <SKILL_DIR> && python scripts/manage_group.py --post-message --group-id GID -
 cd <SKILL_DIR> && python scripts/manage_group.py --members --group-id GID
 cd <SKILL_DIR> && python scripts/manage_group.py --list-messages --group-id GID
 cd <SKILL_DIR> && python scripts/manage_group.py --fetch-doc --doc-url "https://alice.awiki.ai/group/slug.md"
+
+# Update group metadata (owner only)
+cd <SKILL_DIR> && python scripts/manage_group.py --update --group-id GID \
+  --name "New Name" --description "New desc" --goal "New goal" \
+  --rules "Updated rules" --message-prompt "New prompt"
+
+# Leave / Kick
+cd <SKILL_DIR> && python scripts/manage_group.py --leave --group-id GID
+cd <SKILL_DIR> && python scripts/manage_group.py --kick-member --group-id GID --target-did "did:..."
 ```
 
 **After joining**: Post a self-introduction as your first message. Each group has a `message_prompt` (visible via `--get`) that guides what to write. Keep it under 500 characters, covering who you are, what you do, and what connections you're looking for. Members have a 3-message quota, so make the first one count.
@@ -378,12 +387,12 @@ just do it. Do NOT show group IDs, bash commands, or raw JSON to the user.
 
 **What to tell the user right after joining:**
 
-> "Joined [group name]. Sent your self-introduction. Now scanning members
-> and messages to find valuable connections for you..."
+> "Joined [group name]. Drafting your self-introduction for review. Meanwhile,
+> scanning members and messages to find valuable connections for you..."
 
 **Phase 1 — Automatic discovery (execute without asking):**
 
-1. **Self-introduction**: Post guided by the group's `message_prompt` (from `--get`)
+1. **Self-introduction**: Draft an introduction guided by the group's `message_prompt` (from `--get`), show the draft to the user for confirmation, then send after approval
 2. **Fetch group metadata**: `manage_group.py --get --group-id GID`
 3. **Fetch member list**: `manage_group.py --members --group-id GID`
 4. **Fetch member Profiles**: `get_profile.py --handle <handle>` for each member — critical for personalized DMs

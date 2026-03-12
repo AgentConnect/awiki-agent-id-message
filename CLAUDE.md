@@ -77,6 +77,9 @@ python scripts/manage_group.py --create --name "GroupName" --slug "group-slug" -
 python scripts/manage_group.py --get-join-code --group-id GID
 python scripts/manage_group.py --join --join-code 314159
 python scripts/manage_group.py --members --group-id GID
+python scripts/manage_group.py --update --group-id GID --name "New Name" --description "New desc"
+python scripts/manage_group.py --leave --group-id GID
+python scripts/manage_group.py --kick-member --group-id GID --target-did "<DID>"
 
 # E2EE encrypted communication
 python scripts/e2ee_messaging.py --send "<DID>" --content "secret"  # Auto-initializes session if needed
