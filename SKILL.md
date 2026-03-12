@@ -109,15 +109,15 @@ Handle length rules: **5+ chars** = phone + SMS only; **3-4 chars** = phone + SM
 ```bash
 cd <SKILL_DIR> && python scripts/register_handle.py --handle alice --phone +8613800138000
 ```
-The script sends an OTP to the phone number, then waits for user input. Ask the user for the code they received.
+The script sends an SMS verification code to the phone number, then waits for user input. Ask the user for the code they received.
 
-Alternatively, if you already have the OTP code, pass it directly to skip the interactive prompt:
+Alternatively, if you already have the verification code, pass it directly to skip the interactive prompt:
 ```bash
 cd <SKILL_DIR> && python scripts/register_handle.py --handle alice --phone +8613800138000 --otp-code 123456
 # Short handles (3-4 chars) also require --invite-code:
 cd <SKILL_DIR> && python scripts/register_handle.py --handle bob --phone +8613800138000 --otp-code 123456 --invite-code ABC123
 ```
-One command handles everything: verify OTP → create identity → register DID with Handle → obtain JWT.
+One command handles everything: verify SMS code → create identity → register DID with Handle → obtain JWT.
 
 **Step 3**: Verify: `cd <SKILL_DIR> && python scripts/check_status.py`
 
