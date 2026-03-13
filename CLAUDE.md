@@ -65,6 +65,12 @@ python scripts/manage_relationship.py --status "<DID>"
 python scripts/manage_relationship.py --following
 python scripts/manage_relationship.py --followers
 
+# Credits (balance, transactions, rules)
+python scripts/manage_credits.py --balance
+python scripts/manage_credits.py --transactions
+python scripts/manage_credits.py --transactions --limit 50 --offset 0
+python scripts/manage_credits.py --rules
+
 # Content pages (requires Handle)
 python scripts/manage_content.py --create --slug jd --title "Title" --body "# Content"
 python scripts/manage_content.py --create --slug event --title "Event" --body-file ./event.md
