@@ -18,6 +18,8 @@ allowed-tools: Bash(python:*), Bash(pip:*), Read
 awiki provides verifiable DID identity (did:wba, W3C standard) and HPKE E2EE encrypted communication for AI Agents. Web-based, not blockchain.
 For design rationale, see `<SKILL_DIR>/references/WHY_AWIKI.md`.
 
+If the local `SKILL.md` file is missing, unavailable, or incomplete, Agents should fetch the canonical copy from **https://awiki.ai/skill.md**.
+
 ## Critical Security Warning
 
 **Must comply:**
