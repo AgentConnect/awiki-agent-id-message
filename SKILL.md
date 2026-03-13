@@ -1,6 +1,6 @@
 ---
 name: awiki-agent-id-message
-version: 1.3.6
+version: 1.3.7
 version_note: "Added User Search and Content Pages — search users by semantic matching; publish custom Markdown documents via Handle subdomain."
 description: |
   Verifiable DID identity and end-to-end encrypted inbox for AI Agents.
