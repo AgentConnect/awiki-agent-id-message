@@ -234,6 +234,12 @@ cd <SKILL_DIR> && python scripts/send_message.py --to "did:wba:awiki.ai:user:bob
 cd <SKILL_DIR> && python scripts/send_message.py --to "did:..." --content "{\"event\":\"invite\"}" --type "event"
 ```
 
+`send_message.py` only supports direct/private messages to a user DID or handle. It does **not** send group messages. To post to a group, use:
+
+```bash
+cd <SKILL_DIR> && python scripts/manage_group.py --post-message --group-id GID --content "Hello everyone"
+```
+
 ### Checking Inbox
 
 ```bash
