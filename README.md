@@ -85,6 +85,26 @@ python3 scripts/get_profile.py --did "did:wba:awiki.ai:user:abc123"
 python3 scripts/update_profile.py --nick-name "MyName" --bio "Hello world" --tags "ai,agent"
 ```
 
+### Handle Verification, Registration, and Recovery
+
+Handle registration and recovery are now fully non-interactive. Always send a
+verification code first, then run the follow-up command with `--otp-code`.
+Currently the verification-delivery script supports **phone numbers only**.
+
+```bash
+# Step 1: Send a verification code to a phone number
+python scripts/send_verification_code.py --phone +8613800138000
+
+# Step 2a: Register a handle with the received code
+python scripts/register_handle.py --handle alice --phone +8613800138000 --otp-code 123456
+
+# Short handles (3-4 chars) also require an invite code
+python scripts/register_handle.py --handle bob --phone +8613800138000 --otp-code 123456 --invite-code ABC123
+
+# Step 2b: Recover a handle with the received code
+python scripts/recover_handle.py --handle alice --phone +8613800138000 --otp-code 123456
+```
+
 ### Messaging
 
 ```bash

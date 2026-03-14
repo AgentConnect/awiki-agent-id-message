@@ -1,15 +1,20 @@
 """Recover a Handle by rebinding it to a new DID.
 
 Usage:
-    uv run python scripts/recover_handle.py --handle alice --phone +8613800138000
-    uv run python scripts/recover_handle.py --handle alice --phone +8613800138000 --credential alice
-    uv run python scripts/recover_handle.py --handle alice --phone +8613800138000 --credential default --replace-existing
+    # Step 1: Send a verification code to the phone number
+    python scripts/send_verification_code.py --phone +8613800138000
 
-[INPUT]: SDK (handle OTP + recovery RPC), credential_store, local_store, e2ee_store
+    # Step 2: Recover the Handle with the received code
+    python scripts/recover_handle.py --handle alice --phone +8613800138000 --otp-code 123456
+    python scripts/recover_handle.py --handle alice --phone +8613800138000 --otp-code 123456 --credential alice
+    python scripts/recover_handle.py --handle alice --phone +8613800138000 --otp-code 123456 --credential default --replace-existing
+
+[INPUT]: SDK (handle recovery RPC), credential_store, local_store, e2ee_store,
+         pre-issued verification code
 [OUTPUT]: Handle recovery result with safe credential target selection, optional
           credential replacement, and conditional local cache migration
 [POS]: Recovery CLI for users who lost the old DID private key but still control
-       the original Handle phone number
+       the original Handle phone number, using a pre-issued verification code
 
 [PROTOCOL]:
 1. Update this header when logic changes
@@ -33,10 +38,21 @@ from credential_store import (
     save_identity,
 )
 from e2ee_store import delete_e2ee_state
-from utils import SDKConfig, create_user_service_client, recover_handle, send_otp
+from utils import SDKConfig, create_user_service_client, recover_handle
 from utils.logging_config import configure_logging
 
 logger = logging.getLogger(__name__)
+
+
+def _require_otp_code(otp_code: str | None) -> str:
+    """Return a normalized verification code or raise a usage error."""
+    if otp_code is None or not otp_code.strip():
+        raise ValueError(
+            "Verification code is required. First run "
+            "'python scripts/send_verification_code.py --phone <number>' "
+            "and then retry with '--otp-code <code>'."
+        )
+    return otp_code.strip()
 
 
 def _allocate_recovery_credential_name(handle: str) -> str:
@@ -114,7 +130,8 @@ async def do_recover(
     requested_credential_name: str | None,
     replace_existing: bool,
 ) -> None:
-    """Recover a Handle with phone OTP verification."""
+    """Recover a Handle with a pre-issued phone verification code."""
+    normalized_otp_code = _require_otp_code(otp_code)
     credential_name, old_credential = _resolve_recovery_target(
         handle=handle,
         requested_credential_name=requested_credential_name,
@@ -140,20 +157,11 @@ async def do_recover(
     )
 
     async with create_user_service_client(config) as client:
-        if otp_code is None:
-            print(f"Sending OTP to {phone}...")
-            await send_otp(client, phone)
-            print("OTP sent. Check your phone.")
-            otp_code = input("Enter OTP code: ").strip()
-            if not otp_code:
-                print("OTP code is required.")
-                sys.exit(1)
-
         identity, recover_result = await recover_handle(
             client,
             config,
             phone=phone,
-            otp_code=otp_code,
+            otp_code=normalized_otp_code,
             handle=handle,
         )
 
@@ -212,14 +220,21 @@ def main() -> None:
     """CLI entry point."""
     configure_logging(console_level=None, mirror_stdio=True)
 
-    parser = argparse.ArgumentParser(description="Recover a Handle with phone OTP")
+    parser = argparse.ArgumentParser(
+        description="Recover a Handle with a pre-issued verification code"
+    )
     parser.add_argument("--handle", required=True, type=str, help="Handle local-part")
     parser.add_argument("--phone", required=True, type=str,
                         help="Phone number in international format with country code "
                              "(e.g., +8613800138000 for China, +14155552671 for US). "
                              "China local 11-digit numbers are auto-prefixed with +86. "
                              "Non-mainland China numbers MUST include the country code to receive SMS.")
-    parser.add_argument("--otp-code", type=str, default=None, help="OTP code")
+    parser.add_argument(
+        "--otp-code",
+        type=str,
+        default=None,
+        help="Verification code from scripts/send_verification_code.py",
+    )
     parser.add_argument(
         "--credential",
         type=str,

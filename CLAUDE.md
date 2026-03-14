@@ -45,8 +45,10 @@ python scripts/search_users.py "alice"                     # Search users
 python scripts/search_users.py "AI agent" --credential bob # Search with specific credential
 
 # Handle (short name) registration and resolution
-python scripts/register_handle.py --handle alice --phone +8613800138000
-python scripts/register_handle.py --handle bob --phone +8613800138000 --invite-code ABC123
+python scripts/send_verification_code.py --phone +8613800138000
+python scripts/register_handle.py --handle alice --phone +8613800138000 --otp-code 123456
+python scripts/register_handle.py --handle bob --phone +8613800138000 --otp-code 123456 --invite-code ABC123
+python scripts/recover_handle.py --handle alice --phone +8613800138000 --otp-code 123456
 python scripts/resolve_handle.py --handle alice               # Resolve handle to DID
 python scripts/resolve_handle.py --did "<DID>"                # Look up handle by DID
 

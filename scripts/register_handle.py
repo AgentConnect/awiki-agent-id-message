@@ -1,19 +1,23 @@
-"""Register a Handle (human-readable DID alias) interactively.
+"""Register a Handle (human-readable DID alias) with a verification code.
 
 Usage:
-    # Register a Handle (will prompt for OTP)
-    uv run python scripts/register_handle.py --handle alice --phone +8613800138000
+    # Step 1: Send a verification code to the phone number
+    python scripts/send_verification_code.py --phone +8613800138000
 
-    # With invite code (for short handles <= 4 chars)
-    uv run python scripts/register_handle.py --handle bob --phone +8613800138000 --invite-code ABC123
+    # Step 2: Register a Handle with the received code
+    python scripts/register_handle.py --handle alice --phone +8613800138000 --otp-code 123456
+
+    # Short handles (<= 4 chars) also require an invite code
+    python scripts/register_handle.py --handle bob --phone +8613800138000 --otp-code 123456 --invite-code ABC123
 
     # Specify credential name
-    uv run python scripts/register_handle.py --handle alice --phone +8613800138000 --credential myhandle
+    python scripts/register_handle.py --handle alice --phone +8613800138000 --otp-code 123456 --credential myhandle
 
-[INPUT]: SDK (handle registration, OTP), credential_store (save identity),
-         logging_config
+[INPUT]: SDK (handle registration), credential_store (save identity),
+         logging_config, pre-issued verification code
 [OUTPUT]: Register Handle + DID identity and save credentials
-[POS]: Interactive CLI for Handle registration
+[POS]: Non-interactive CLI for Handle registration with a pre-issued
+       verification code
 
 [PROTOCOL]:
 1. Update this header when logic changes
@@ -23,24 +27,35 @@ Usage:
 import argparse
 import asyncio
 import logging
-import sys
 
-from utils import SDKConfig, create_user_service_client, send_otp, register_handle
+from utils import SDKConfig, create_user_service_client, register_handle
 from utils.logging_config import configure_logging
 from credential_store import save_identity
 
 logger = logging.getLogger(__name__)
 
 
+def _require_otp_code(otp_code: str | None) -> str:
+    """Return a normalized verification code or raise a usage error."""
+    if otp_code is None or not otp_code.strip():
+        raise ValueError(
+            "Verification code is required. First run "
+            "'python scripts/send_verification_code.py --phone <number>' "
+            "and then retry with '--otp-code <code>'."
+        )
+    return otp_code.strip()
+
+
 async def do_register(
     handle: str,
     phone: str,
-    otp_code: str | None = None,
+    otp_code: str | None,
     invite_code: str | None = None,
     name: str | None = None,
     credential_name: str = "default",
 ) -> None:
-    """Register a Handle interactively."""
+    """Register a Handle using a pre-issued verification code."""
+    normalized_otp_code = _require_otp_code(otp_code)
     logger.info(
         "Registering handle handle=%s credential=%s invite_code_present=%s",
         handle,
@@ -53,23 +68,12 @@ async def do_register(
     print(f"  DID domain  : {config.did_domain}")
 
     async with create_user_service_client(config) as client:
-        # 1. Send OTP if not provided
-        if otp_code is None:
-            print(f"\nSending OTP to {phone}...")
-            await send_otp(client, phone)
-            print("OTP sent. Check your phone.")
-            otp_code = input("Enter OTP code: ").strip()
-            if not otp_code:
-                print("OTP code is required.")
-                sys.exit(1)
-
-        # 2. Register Handle
         print(f"\nRegistering Handle '{handle}'...")
         identity = await register_handle(
             client=client,
             config=config,
             phone=phone,
-            otp_code=otp_code,
+            otp_code=normalized_otp_code,
             handle=handle,
             invite_code=invite_code,
             name=name or handle,
@@ -104,7 +108,10 @@ async def do_register(
 def main() -> None:
     configure_logging(console_level=None, mirror_stdio=True)
 
-    parser = argparse.ArgumentParser(description="Register a Handle (human-readable DID alias)")
+    parser = argparse.ArgumentParser(
+        description="Register a Handle (human-readable DID alias) with a pre-issued "
+        "verification code"
+    )
     parser.add_argument("--handle", required=True, type=str,
                         help="Handle local-part (e.g., alice)")
     parser.add_argument("--phone", required=True, type=str,
@@ -113,7 +120,7 @@ def main() -> None:
                              "China local 11-digit numbers are auto-prefixed with +86. "
                              "Non-mainland China numbers MUST include the country code to receive SMS.")
     parser.add_argument("--otp-code", type=str, default=None,
-                        help="OTP code (if already obtained; otherwise will send and prompt)")
+                        help="Verification code from scripts/send_verification_code.py")
     parser.add_argument("--invite-code", type=str, default=None,
                         help="Invite code (required for short handles <= 4 chars)")
     parser.add_argument("--name", type=str, default=None,
@@ -127,14 +134,17 @@ def main() -> None:
         args.handle,
         args.credential,
     )
-    asyncio.run(do_register(
-        handle=args.handle,
-        phone=args.phone,
-        otp_code=args.otp_code,
-        invite_code=args.invite_code,
-        name=args.name,
-        credential_name=args.credential,
-    ))
+    try:
+        asyncio.run(do_register(
+            handle=args.handle,
+            phone=args.phone,
+            otp_code=args.otp_code,
+            invite_code=args.invite_code,
+            name=args.name,
+            credential_name=args.credential,
+        ))
+    except ValueError as exc:
+        parser.exit(status=2, message=f"Error: {exc}\n")
 
 
 if __name__ == "__main__":

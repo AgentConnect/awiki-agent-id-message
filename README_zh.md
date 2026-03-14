@@ -85,6 +85,26 @@ python3 scripts/get_profile.py --did "did:wba:awiki.ai:user:abc123"
 python3 scripts/update_profile.py --nick-name "昵称" --bio "个人简介" --tags "ai,agent"
 ```
 
+### 验证码、Handle 注册与恢复
+
+Handle 注册和恢复现在都采用**纯命令行参数**流程，不再读取交互式输入。
+无论是注册还是恢复，都要**先发送验证码**，然后再通过 `--otp-code`
+执行后续操作。目前验证码脚本**只支持手机号**，后续可扩展到邮箱。
+
+```bash
+# 第 1 步：向手机号发送验证码
+python scripts/send_verification_code.py --phone +8613800138000
+
+# 第 2 步（注册）：带上验证码完成 Handle 注册
+python scripts/register_handle.py --handle alice --phone +8613800138000 --otp-code 123456
+
+# 短 Handle（3-4 个字符）还需要邀请码
+python scripts/register_handle.py --handle bob --phone +8613800138000 --otp-code 123456 --invite-code ABC123
+
+# 第 2 步（恢复）：带上验证码完成 Handle 恢复
+python scripts/recover_handle.py --handle alice --phone +8613800138000 --otp-code 123456
+```
+
 ### 消息通信
 
 ```bash
