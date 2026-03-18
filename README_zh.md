@@ -19,6 +19,7 @@
 - **社交关系** - 关注/取关、查看粉丝/关注列表、互关好友检测
 - **发现型群组** - 创建低噪音发现型群组、管理 join-code，并且只能通过全局 6 位数字 join-code 入群
 - **E2EE 加密通信** - 端到端加密消息收发，自动密钥交换握手
+- **Handle 注册** - 注册短名称（Handle），支持手机号或邮箱验证
 
 ## 快速开始
 
@@ -70,6 +71,22 @@ python3 scripts/setup_identity.py --load default
 
 # 删除身份
 python3 scripts/setup_identity.py --delete myid
+```
+
+### Handle 注册
+
+```bash
+# 使用手机号注册 Handle
+python3 scripts/register_handle.py --handle alice --phone +8613800138000
+
+# 使用邮箱注册 Handle
+python3 scripts/register_handle.py --handle alice --email user@example.com
+
+# 使用邀请码注册
+python3 scripts/register_handle.py --handle bob --phone +8613800138000 --invite-code ABC123
+
+# 解析 Handle 到 DID
+python3 scripts/resolve_handle.py --handle alice
 ```
 
 ### Profile 管理

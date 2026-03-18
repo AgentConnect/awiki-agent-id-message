@@ -1,10 +1,14 @@
 """Handle (short name) registration and resolution utilities.
 
 [INPUT]: httpx.AsyncClient, SDKConfig, DIDIdentity, rpc_call(), create_identity(), register_did()
-[OUTPUT]: send_otp(), register_handle(), recover_handle(), resolve_handle(),
-          lookup_handle(), normalize_phone()
+[OUTPUT]: send_otp(), register_handle(), register_handle_with_email(),
+          send_email_verification(), check_email_verified(),
+          recover_handle(), resolve_handle(), lookup_handle(), normalize_phone(),
+          bind_email_send(), bind_phone_send_otp(), bind_phone_verify(),
+          wait_for_email_verification()
 [POS]: Wraps Handle registration and resolution flows, built on top of auth.py and identity.py.
        Uses JSON-RPC 2.0 endpoints: /user-service/handle/rpc and /user-service/did-auth/rpc.
+       Uses REST endpoints: /user-service/auth/email-send and /user-service/auth/email-status.
 
 [PROTOCOL]:
 1. Update this header when logic changes
@@ -26,6 +30,16 @@ from utils.auth import get_jwt_via_wba
 
 HANDLE_RPC = "/user-service/handle/rpc"
 DID_AUTH_RPC = "/user-service/did-auth/rpc"
+
+# ==================== Email verification REST endpoints ====================
+
+EMAIL_SEND_REST = "/user-service/auth/email-send"
+EMAIL_STATUS_REST = "/user-service/auth/email-status"
+
+# ==================== Account binding REST endpoints ====================
+
+PHONE_BIND_SEND_REST = "/user-service/auth/phone-bind-send"
+PHONE_BIND_VERIFY_REST = "/user-service/auth/phone-bind-verify"
 
 
 def _sanitize_otp(code: str) -> str:
@@ -179,6 +193,253 @@ async def register_handle(
     return identity
 
 
+# ==================== Email verification functions ====================
+
+
+async def send_email_verification(
+    client: httpx.AsyncClient,
+    email: str,
+) -> dict[str, Any]:
+    """Send email verification (activation link) for Handle registration.
+
+    Args:
+        client: HTTP client pointing to user-service.
+        email: Email address.
+
+    Returns:
+        Response dict with "message" field.
+
+    Raises:
+        httpx.HTTPStatusError: On HTTP error (429 rate limit, 400 bad request, etc).
+    """
+    resp = await client.post(EMAIL_SEND_REST, json={"email": email.strip().lower()})
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def check_email_verified(
+    client: httpx.AsyncClient,
+    email: str,
+) -> tuple[bool, str | None]:
+    """Check if an email has been verified.
+
+    Args:
+        client: HTTP client pointing to user-service.
+        email: Email address.
+
+    Returns:
+        (verified: bool, verified_at: str | None)
+    """
+    resp = await client.get(EMAIL_STATUS_REST, params={"email": email.strip().lower()})
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("verified", False), data.get("verified_at")
+
+
+async def wait_for_email_verification(
+    client: httpx.AsyncClient,
+    email: str,
+    send_fn: Any | None = None,
+    timeout: int = 300,
+) -> None:
+    """Send activation email and wait for user to verify it.
+
+    Shared helper that encapsulates the common "send email -> prompt -> check status"
+    flow used by both register_handle.py and bind_contact.py.
+
+    Args:
+        client: HTTP client pointing to user-service.
+        email: Email address to verify.
+        send_fn: Async callable to send the activation email.
+                 If None, uses send_email_verification(client, email).
+                 For binding flow, pass a lambda that includes jwt_token.
+        timeout: Not currently used (reserved for future polling support).
+
+    Raises:
+        httpx.HTTPStatusError: On HTTP error from send or check calls.
+        SystemExit: If email is not verified after user presses Enter.
+    """
+    import sys
+
+    # 1. Check if email is already verified
+    verified, _ = await check_email_verified(client, email)
+    if verified:
+        return
+
+    # 2. Send activation email
+    print(f"\nSending activation email to {email}...")
+    if send_fn is not None:
+        await send_fn()
+    else:
+        await send_email_verification(client, email)
+    print("Activation email sent. Please check your inbox and click the activation link.")
+
+    # 3. Wait for user to verify
+    input("\nPress Enter after you've verified your email: ")
+
+    # 4. Check verification status
+    verified, _ = await check_email_verified(client, email)
+    if not verified:
+        print("Email not yet verified. Please click the activation link first.")
+        sys.exit(1)
+
+
+async def register_handle_with_email(
+    client: httpx.AsyncClient,
+    config: SDKConfig,
+    email: str,
+    handle: str,
+    invite_code: str | None = None,
+    name: str | None = None,
+    is_public: bool = False,
+    services: list[dict[str, Any]] | None = None,
+) -> DIDIdentity:
+    """One-stop Handle registration with email: create identity -> register DID with Handle -> obtain JWT.
+
+    Email must be verified via activation link before calling this function.
+
+    Args:
+        client: HTTP client pointing to user-service.
+        config: SDK configuration.
+        email: Verified email address.
+        handle: Handle local-part (e.g., "alice").
+        invite_code: Invite code (required for short handles <= 4 chars).
+        name: Display name.
+        is_public: Whether publicly visible.
+        services: Custom service entry list for DID document.
+
+    Returns:
+        DIDIdentity with user_id and jwt_token populated.
+
+    Raises:
+        JsonRpcError: When registration fails (email not verified, handle taken, etc).
+    """
+    # 1. Create key-bound DID identity with handle as path prefix
+    identity = create_identity(
+        hostname=config.did_domain,
+        path_prefix=[handle],
+        proof_purpose="authentication",
+        domain=config.did_domain,
+        services=services,
+    )
+
+    # 2. Register DID with Handle + email parameters (no phone/otp_code needed)
+    payload: dict[str, Any] = {
+        "did_document": identity.did_document,
+        "handle": handle,
+        "email": email.strip().lower(),
+    }
+    if invite_code is not None:
+        payload["invite_code"] = invite_code
+    if name is not None:
+        payload["name"] = name
+    if is_public:
+        payload["is_public"] = True
+
+    reg_result = await rpc_call(client, DID_AUTH_RPC, "register", payload)
+    identity.user_id = reg_result["user_id"]
+
+    # 3. Registration returns access_token for handle mode
+    if reg_result.get("access_token"):
+        identity.jwt_token = reg_result["access_token"]
+    else:
+        identity.jwt_token = await get_jwt_via_wba(client, identity, config.did_domain)
+
+    return identity
+
+
+# ==================== Account binding functions ====================
+
+
+async def bind_email_send(
+    client: httpx.AsyncClient,
+    email: str,
+    jwt_token: str,
+) -> dict[str, Any]:
+    """Send email verification for binding email to an existing account.
+
+    Reuses the /auth/email-send endpoint with JWT header.
+    After this call, user must click the activation link in their email.
+    Then call check_email_verified() to confirm binding status.
+
+    Args:
+        client: HTTP client pointing to user-service.
+        email: Email address to bind.
+        jwt_token: User's JWT access token.
+
+    Returns:
+        Response dict with "message" field.
+
+    Raises:
+        httpx.HTTPStatusError: On HTTP error (429 rate limit, 400 bad request, etc).
+    """
+    resp = await client.post(
+        EMAIL_SEND_REST,
+        json={"email": email.strip().lower()},
+        headers={"Authorization": f"Bearer {jwt_token}"},
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def bind_phone_send_otp(
+    client: httpx.AsyncClient,
+    phone: str,
+    jwt_token: str,
+) -> dict[str, Any]:
+    """Send OTP for binding phone to an existing account.
+
+    Args:
+        client: HTTP client pointing to user-service.
+        phone: Phone number (e.g., +8613800138000 or 13800138000).
+        jwt_token: User's JWT access token.
+
+    Returns:
+        Response dict with "message" field.
+
+    Raises:
+        httpx.HTTPStatusError: 401 invalid JWT, 409 phone taken, 429 rate limit.
+    """
+    normalized = normalize_phone(phone)
+    resp = await client.post(
+        PHONE_BIND_SEND_REST,
+        json={"phone": normalized},
+        headers={"Authorization": f"Bearer {jwt_token}"},
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def bind_phone_verify(
+    client: httpx.AsyncClient,
+    phone: str,
+    otp_code: str,
+    jwt_token: str,
+) -> dict[str, Any]:
+    """Verify OTP and bind phone to existing account.
+
+    Args:
+        client: HTTP client pointing to user-service.
+        phone: Phone number (same as sent to bind_phone_send_otp).
+        otp_code: 6-digit OTP code.
+        jwt_token: User's JWT access token.
+
+    Returns:
+        Response dict with "success" and "phone" fields.
+
+    Raises:
+        httpx.HTTPStatusError: 401 invalid JWT/OTP, 409 phone taken.
+    """
+    normalized = normalize_phone(phone)
+    resp = await client.post(
+        PHONE_BIND_VERIFY_REST,
+        json={"phone": normalized, "code": _sanitize_otp(otp_code)},
+        headers={"Authorization": f"Bearer {jwt_token}"},
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 async def recover_handle(
     client: httpx.AsyncClient,
     config: SDKConfig,
@@ -258,7 +519,14 @@ __all__ = [
     "normalize_phone",
     "send_otp",
     "register_handle",
+    "register_handle_with_email",
+    "send_email_verification",
+    "check_email_verified",
+    "wait_for_email_verification",
     "recover_handle",
     "resolve_handle",
     "lookup_handle",
+    "bind_email_send",
+    "bind_phone_send_otp",
+    "bind_phone_verify",
 ]
