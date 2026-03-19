@@ -190,8 +190,9 @@ async def _forward(
     """Forward a message to OpenClaw via ``chat.inject`` + HTTP ``/hooks/wake``.
 
     Uses ``openclaw gateway call chat.inject`` which appends an assistant note
-    directly to the TUI transcript and broadcasts it to connected clients —
-    no model call, zero token cost, instant display.
+    directly to session transcripts — no model call, zero token cost, instant
+    display.  Injects into each session key configured in
+    ``cfg.inject_session_keys`` (default: TUI only).
 
     Also calls HTTP ``/hooks/wake`` to trigger heartbeat, which handles
     external channel delivery (Telegram, WhatsApp, etc.) when configured.
@@ -200,40 +201,42 @@ async def _forward(
     sender = _truncate_did(params.get("sender_did", "unknown"))
     text = _build_event_text(params, route, cfg)
 
-    # Primary: chat.inject (direct TUI injection, no model call)
+    # Primary: chat.inject into each configured session
     inject_ok = False
-    inject_params = json.dumps(
-        {"sessionKey": "agent:main:main", "message": text},
-        ensure_ascii=False,
-    )
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            _OPENCLAW_BIN, "gateway", "call", "chat.inject",
-            "--params", inject_params, "--json",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+    for session_key in cfg.inject_session_keys:
+        inject_params = json.dumps(
+            {"sessionKey": session_key, "message": text},
+            ensure_ascii=False,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
-        stdout_str = stdout.decode().strip() if stdout else ""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                _OPENCLAW_BIN, "gateway", "call", "chat.inject",
+                "--params", inject_params, "--json",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+            stdout_str = stdout.decode().strip() if stdout else ""
 
-        if proc.returncode == 0 and "ok" in stdout_str.lower():
-            logger.info(
-                "%sForward success (chat.inject) route=%s sender=%s",
-                e2ee_tag, route, sender,
-            )
-            inject_ok = True
-        else:
-            stderr_str = stderr.decode().strip() if stderr else ""
-            logger.warning(
-                "%schat.inject failed route=%s exit=%d stdout=%s stderr=%s",
-                e2ee_tag, route, proc.returncode, stdout_str[:200], stderr_str[:200],
-            )
-    except asyncio.TimeoutError:
-        logger.warning("chat.inject timed out route=%s sender=%s", route, sender)
-    except FileNotFoundError:
-        logger.warning("openclaw CLI not found at %s", _OPENCLAW_BIN)
-    except Exception as exc:
-        logger.error("chat.inject error route=%s: %s", route, exc)
+            if proc.returncode == 0 and "ok" in stdout_str.lower():
+                logger.info(
+                    "%sForward success (chat.inject) route=%s sender=%s session=%s",
+                    e2ee_tag, route, sender, session_key,
+                )
+                inject_ok = True
+            else:
+                stderr_str = stderr.decode().strip() if stderr else ""
+                logger.warning(
+                    "%schat.inject failed route=%s session=%s exit=%d stdout=%s stderr=%s",
+                    e2ee_tag, route, session_key, proc.returncode, stdout_str[:200], stderr_str[:200],
+                )
+        except asyncio.TimeoutError:
+            logger.warning("chat.inject timed out route=%s session=%s", route, session_key)
+        except FileNotFoundError:
+            logger.warning("openclaw CLI not found at %s", _OPENCLAW_BIN)
+            break
+        except Exception as exc:
+            logger.error("chat.inject error route=%s session=%s: %s", route, session_key, exc)
 
     # HTTP /hooks/wake — also triggers heartbeat for external channel delivery
     # (e.g. Telegram, WhatsApp).  When chat.inject succeeded this is a
