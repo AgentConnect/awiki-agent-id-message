@@ -423,6 +423,10 @@ async def listen_loop(
                             if msg_type == "e2ee_msg":
                                 result = await e2ee_handler.decrypt_message(params)
                                 if result.error_responses:
+                                    logger.warning(
+                                        "E2EE decrypt failed, sending error response: sender=%s errors=%d",
+                                        _truncate_did(sender_did), len(result.error_responses),
+                                    )
                                     for resp_type, resp_content in result.error_responses:
                                         await ws.send_message(
                                             receiver_did=sender_did,
@@ -430,9 +434,17 @@ async def listen_loop(
                                             msg_type=resp_type,
                                         )
                                 if result.params is None:
+                                    logger.warning(
+                                        "E2EE decrypt returned no params (dropped): sender=%s",
+                                        _truncate_did(sender_did),
+                                    )
                                     await e2ee_handler.maybe_save_state()
                                     continue
                                 params = result.params
+                                logger.info(
+                                    "E2EE decrypt success: sender=%s type=%s",
+                                    _truncate_did(sender_did), params.get("type", ""),
+                                )
                                 await e2ee_handler.maybe_save_state()
 
                         # Original routing logic
