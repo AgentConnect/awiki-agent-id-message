@@ -30,9 +30,8 @@ import asyncio
 import logging
 import sys
 
-import httpx
-
 from utils import SDKConfig, create_user_service_client, register_handle
+from utils.cli_errors import exit_with_cli_error
 from utils.handle import (
     ensure_email_verification,
     register_handle_with_email,
@@ -68,9 +67,11 @@ async def do_register(
         wait_for_email_verification,
     )
     config = SDKConfig.load()
-    print(f"Service configuration:")
-    print(f"  user-service: {config.user_service_url}")
-    print(f"  DID domain  : {config.did_domain}")
+    logger.info(
+        "Using service configuration user_service=%s did_domain=%s",
+        config.user_service_url,
+        config.did_domain,
+    )
 
     # In email mode, OTP is not used even if provided.
     if email and otp_code:
@@ -129,12 +130,9 @@ async def do_register(
 async def _register_with_phone(client, config, handle, phone, otp_code, invite_code, name):
     """Phone-based registration with a pre-issued OTP code."""
     if otp_code is None:
-        raise ValueError(
-            "OTP code is required. "
-            f"First run: uv run python scripts/send_verification_code.py --phone {phone}"
-        )
+        raise ValueError("OTP code is required for phone registration.")
 
-    print(f"\nRegistering Handle '{handle}'...")
+    logger.info("Registering handle via phone handle=%s phone=%s", handle, phone)
     return await register_handle(
         client=client,
         config=config,
@@ -160,19 +158,13 @@ async def _register_with_email(
     poll_interval: float,
 ):
     """Email-based registration with optional polling."""
-    try:
-        verification_result = await ensure_email_verification(
-            client,
-            email,
-            wait=wait_for_verification,
-            timeout=verification_timeout,
-            poll_interval=poll_interval,
-        )
-    except (httpx.HTTPStatusError, httpx.RequestError) as e:
-        print(f"Failed to send activation email: {e}")
-        sys.exit(1)
-    except ValueError as e:
-        raise ValueError(str(e)) from e
+    verification_result = await ensure_email_verification(
+        client,
+        email,
+        wait=wait_for_verification,
+        timeout=verification_timeout,
+        poll_interval=poll_interval,
+    )
 
     if not verification_result.verified:
         if wait_for_verification:
@@ -188,7 +180,7 @@ async def _register_with_email(
             )
         return None
 
-    print(f"\nEmail verified. Registering Handle '{handle}'...")
+    logger.info("Registering handle via email handle=%s email=%s", handle, email)
     return await register_handle_with_email(
         client=client,
         config=config,
@@ -266,7 +258,19 @@ def main() -> None:
         if not completed:
             raise SystemExit(PENDING_VERIFICATION_EXIT_CODE)
     except ValueError as exc:
-        parser.exit(status=2, message=f"Error: {exc}\n")
+        exit_with_cli_error(
+            exc=exc,
+            logger=logger,
+            context="register_handle CLI validation failed",
+            exit_code=2,
+            log_traceback=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        exit_with_cli_error(
+            exc=exc,
+            logger=logger,
+            context="register_handle CLI failed",
+        )
 
 
 if __name__ == "__main__":
