@@ -8,7 +8,7 @@ description: |
   Provides self-sovereign identity, Handle (short name) registration, content pages publishing,
   federated messaging, group communication, and HPKE-based E2EE — Web-based, not blockchain.
   Designed natively for autonomous Agents.
-  Triggers: DID, identity, handle, profile, content, publish, page, inbox, send message, follow, group, E2EE, WebSocket, listener, search, 用户搜索, find user.
+  Triggers: DID, identity, handle, profile, content, publish, page, inbox, send message, follow, group, E2EE, WebSocket, listener, search, find user.
   Proactive behaviors: status check on session start; 15-minute heartbeat; default-on E2EE auto-processing.
 allowed-tools: Bash(python:*), Bash(pip:*), Read
 ---
