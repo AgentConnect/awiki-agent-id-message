@@ -80,9 +80,6 @@ class ListenerConfig:
     # Heartbeat interval (must be < ws_idle_timeout=300s)
     heartbeat_interval: float = 120.0
 
-    # chat.inject target session keys (inject into each session in order)
-    inject_session_keys: tuple[str, ...] = ("agent:main:main",)
-
     def __post_init__(self) -> None:
         if self.mode not in ROUTING_MODES:
             raise ValueError(
@@ -181,7 +178,6 @@ class ListenerConfig:
             routing=routing,
             e2ee_save_interval=float(data.get("e2ee_save_interval", 30.0)),
             e2ee_decrypt_fail_action=data.get("e2ee_decrypt_fail_action", "drop"),
-            inject_session_keys=tuple(data.get("inject_session_keys", ("agent:main:main",))),
         )
         logger.info(
             "Loaded listener config mode=%s agent_webhook=%s wake_webhook=%s",
