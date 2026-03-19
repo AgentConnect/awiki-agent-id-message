@@ -44,12 +44,17 @@ python scripts/update_profile.py --nick-name "Name" --bio "Bio" --tags "tag1,tag
 python scripts/search_users.py "alice"                     # Search users
 python scripts/search_users.py "AI agent" --credential bob # Search with specific credential
 
-# Handle (short name) registration and resolution
+# Handle (short name) registration and resolution (supports phone and email verification)
 python scripts/send_verification_code.py --phone +8613800138000
 python scripts/register_handle.py --handle alice --phone +8613800138000
+python scripts/register_handle.py --handle alice --email user@example.com
 python scripts/register_handle.py --handle bob --phone +8613800138000 --invite-code ABC123
 python scripts/resolve_handle.py --handle alice               # Resolve handle to DID
 python scripts/resolve_handle.py --did "<DID>"                # Look up handle by DID
+
+# Bind contact info (requires existing identity with JWT)
+python scripts/bind_contact.py --email user@example.com        # Bind email to current account
+python scripts/bind_contact.py --phone +8613800138000          # Bind phone (sends OTP, then verifies)
 
 # Messaging (requires identity creation first)
 python scripts/send_message.py --to "<DID>" --content "hello"
@@ -137,7 +142,7 @@ Three-layer architecture: CLI script layer -> Persistence layer -> Core utility 
 - **auth.py**: DID auth helpers — `create_authenticated_identity()` chains create identity -> `register_did()` -> `get_jwt_via_wba()` for first-time setup; `update_did_document()` uses DID WBA auth to update an existing DID document without re-registering
 - **client.py**: httpx AsyncClient factory (`create_user_service_client`, `create_molt_message_client`), 30s timeout, `trust_env=False`
 - **rpc.py**: JSON-RPC 2.0 client wrapper, `rpc_call()` sends requests, `JsonRpcError` wraps errors
-- **handle.py**: Handle (short name) registration and resolution — `send_otp()`, `register_handle()` (one-stop: create identity + register DID with handle + JWT), `resolve_handle()`, `lookup_handle()`. Uses `/user-service/handle/rpc` and `/user-service/did-auth/rpc` endpoints
+- **handle.py**: Handle (short name) registration and resolution — `send_otp()`, `register_handle()` (one-stop: create identity + register DID with handle + JWT), `resolve_handle()`, `lookup_handle()`, `send_email_verification()`, `check_email_verified()`, `register_handle_with_email()`, `bind_email_send()`, `bind_phone_send_otp()`, `bind_phone_verify()`. Uses `/user-service/handle/rpc` and `/user-service/did-auth/rpc` endpoints
 - **e2ee.py**: `E2eeClient` — Uses HPKE (RFC 9180, X25519 key agreement + chain Ratchet forward secrecy). One-step initialization (no multi-step handshake). Key separation: key-2 secp256r1 for signing + key-3 X25519 for key agreement (separate from DID's secp256k1). Supports `export_state()`/`from_state()` for cross-process state recovery
 - **ws.py**: `WsClient` — WebSocket client wrapper. Uses JWT query parameter authentication to connect to molt-message `/message/ws` endpoint. Supports JSON-RPC request/response, push notification reception, application-layer heartbeat (ping/pong)
 - **resolve.py**: `resolve_to_did()` — Handle-to-DID resolution. If input starts with `did:`, returns as-is. Otherwise calls `GET /user-service/.well-known/handle/{local_part}` (no auth required). Always resolves via server, no local cache
@@ -155,6 +160,7 @@ Three-layer architecture: CLI script layer -> Persistence layer -> Core utility 
 - **e2ee_handler.py**: `E2eeHandler` — E2EE transparent handler for WebSocket listener. Intercepts E2EE messages before `classify_message`: protocol messages (init/rekey/error) are handled internally without forwarding, encrypted messages (e2ee_msg) are decrypted and forwarded as plaintext. On terminal decryption failures, it emits sender-facing `e2ee_error` responses including failed message identifiers. asyncio.Lock protects concurrency, periodic state saving
 - **ws_listener.py**: WebSocket listener — persistent background process + cross-platform service lifecycle management. Reuses `WsClient` to connect to molt-message WebSocket. E2EE messages handled transparently by `E2eeHandler` (optional). Received messages stored to local SQLite via `local_store`. Others routed via `classify_message()` (agent/wake/discard) and forwarded to corresponding localhost webhook endpoints. Subcommands: `run` (foreground debug), `install` (install background service), `uninstall`, `start`/`stop`/`status` (management). Service management delegated to `service_manager.py`
 - **service_manager.py**: `ServiceManager` base class + `MacOSServiceManager` (launchd) / `LinuxServiceManager` (systemd) / `WindowsServiceManager` (Task Scheduler) + `get_service_manager()` factory. Handles install/uninstall/start/stop/status for each platform
+- **bind_contact.py**: Contact binding CLI — bind email or phone number to an existing authenticated account via `bind_email_send()`, `bind_phone_send_otp()`, `bind_phone_verify()` from handle.py
 - Other scripts are CLI entry points for each feature, wrapping async calls via `asyncio.run()`
 
 ### service/ — Cross-Platform Service Management

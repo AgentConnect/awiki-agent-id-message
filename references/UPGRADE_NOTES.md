@@ -2,6 +2,13 @@
 
 Recent upgrades in this release line are grouped into core features and optimizations.
 
+## Email Registration Support
+
+- **Email as an alternative to phone**: users can now register a Handle with email verification instead of phone. Supply `--email user@example.com` to `register_handle.py` in place of `--phone`.
+- **New `--email` parameter for `register_handle.py`**: the CLI accepts either `--phone` or `--email` for identity verification during Handle registration.
+- **New utility functions in `handle.py`**: `send_email_verification()`, `check_email_verified()`, `register_handle_with_email()`.
+- **SKILL.md onboarding flow updated**: the guided onboarding now offers an email option alongside phone verification.
+
 ## Core Features
 
 - **Discovery group management**: groups are now presented as a core collaboration feature. Users can create discovery groups with `name`, `slug`, `description`, `goal`, `rules`, and `message_prompt`; get or refresh the global 6-digit join code; enable or disable joining; join with `--passcode`; list members and messages; post group messages; and fetch the public Markdown entry document.

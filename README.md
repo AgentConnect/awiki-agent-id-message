@@ -19,6 +19,7 @@
 - **Social Relationships** - Follow/unfollow users, view followers/following lists, mutual friend detection
 - **Groups** - Create unlimited or discovery-style groups, manage join-codes, and join only with the global 6-digit join-code
 - **E2EE Communication** - End-to-end encrypted messaging with automatic key exchange handshake
+- **Handle Registration** - Register short names (handles) with phone or email verification
 
 ## Quick Start
 
@@ -70,6 +71,22 @@ python3 scripts/setup_identity.py --load default
 
 # Delete an identity
 python3 scripts/setup_identity.py --delete myid
+```
+
+### Handle Registration
+
+```bash
+# Register a handle with phone verification
+python3 scripts/register_handle.py --handle alice --phone +8613800138000
+
+# Register a handle with email verification
+python3 scripts/register_handle.py --handle alice --email user@example.com
+
+# Register with an invite code
+python3 scripts/register_handle.py --handle bob --phone +8613800138000 --invite-code ABC123
+
+# Resolve a handle to DID
+python3 scripts/resolve_handle.py --handle alice
 ```
 
 ### Profile
