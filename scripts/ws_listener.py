@@ -399,18 +399,27 @@ async def listen_loop(
 
                         params = notification.get("params", {})
                         msg_type = params.get("type", "text")
+                        sender_did = params.get("sender_did", "")
+                        logger.info(
+                            "Received message: type=%s sender=%s",
+                            msg_type, _truncate_did(sender_did),
+                        )
 
                         # E2EE message interception (before classify_message)
                         if (e2ee_handler is not None
                                 and e2ee_handler.is_ready
                                 and e2ee_handler.is_e2ee_type(msg_type)):
-                            sender_did = params.get("sender_did", "")
                             if sender_did == my_did:
+                                logger.debug("Skipping self-sent E2EE message")
                                 continue
 
                             if e2ee_handler.is_protocol_type(msg_type):
                                 responses = await e2ee_handler.handle_protocol_message(params)
                                 if responses:
+                                    logger.info(
+                                        "E2EE protocol handled: type=%s sender=%s responses=%d",
+                                        msg_type, _truncate_did(sender_did), len(responses),
+                                    )
                                     for resp_type, resp_content in responses:
                                         await ws.send_message(
                                             receiver_did=sender_did,
@@ -424,7 +433,7 @@ async def listen_loop(
                                 result = await e2ee_handler.decrypt_message(params)
                                 if result.error_responses:
                                     logger.warning(
-                                        "E2EE decrypt failed, sending error response: sender=%s errors=%d",
+                                        "E2EE decrypt failed, sending error: sender=%s errors=%d",
                                         _truncate_did(sender_did), len(result.error_responses),
                                     )
                                     for resp_type, resp_content in result.error_responses:
@@ -435,20 +444,26 @@ async def listen_loop(
                                         )
                                 if result.params is None:
                                     logger.warning(
-                                        "E2EE decrypt returned no params (dropped): sender=%s",
+                                        "E2EE decrypt dropped: sender=%s",
                                         _truncate_did(sender_did),
                                     )
                                     await e2ee_handler.maybe_save_state()
                                     continue
                                 params = result.params
                                 logger.info(
-                                    "E2EE decrypt success: sender=%s type=%s",
+                                    "E2EE decrypt OK: sender=%s type=%s content_len=%d",
                                     _truncate_did(sender_did), params.get("type", ""),
+                                    len(str(params.get("content", ""))),
                                 )
                                 await e2ee_handler.maybe_save_state()
 
                         # Original routing logic
                         route = classify_message(params, my_did, cfg)
+                        logger.info(
+                            "Route: %s sender=%s type=%s e2ee=%s",
+                            route or "DROP", _truncate_did(params.get("sender_did", "")),
+                            params.get("type", ""), bool(params.get("_e2ee")),
+                        )
 
                         # Store message locally before routing
                         try:
@@ -520,7 +535,7 @@ async def listen_loop(
                             logger.debug("Failed to store message locally", exc_info=True)
 
                         if route is None:
-                            logger.debug(
+                            logger.info(
                                 "Dropping message: sender=%s type=%s",
                                 _truncate_did(params.get("sender_did", "")),
                                 params.get("type", ""),
@@ -529,6 +544,10 @@ async def listen_loop(
 
                         # All routes now use /hooks/wake to inject into main session
                         url = cfg.wake_webhook_url
+                        logger.info(
+                            "Forwarding: route=%s sender=%s wake_url=%s",
+                            route, _truncate_did(params.get("sender_did", "")), url,
+                        )
                         await _forward(http, url, cfg.webhook_token, params, route, cfg)
 
             except asyncio.CancelledError:
