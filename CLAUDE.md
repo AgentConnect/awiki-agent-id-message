@@ -46,15 +46,18 @@ python scripts/search_users.py "AI agent" --credential bob # Search with specifi
 
 # Handle (short name) registration and resolution (supports phone and email verification)
 python scripts/send_verification_code.py --phone +8613800138000
-python scripts/register_handle.py --handle alice --phone +8613800138000
+python scripts/register_handle.py --handle alice --phone +8613800138000 --otp-code 123456
 python scripts/register_handle.py --handle alice --email user@example.com
-python scripts/register_handle.py --handle bob --phone +8613800138000 --invite-code ABC123
+python scripts/register_handle.py --handle alice --email user@example.com --wait-for-email-verification
+python scripts/register_handle.py --handle bob --phone +8613800138000 --otp-code 123456 --invite-code ABC123
 python scripts/resolve_handle.py --handle alice               # Resolve handle to DID
 python scripts/resolve_handle.py --did "<DID>"                # Look up handle by DID
 
 # Bind contact info (requires existing identity with JWT)
-python scripts/bind_contact.py --email user@example.com        # Bind email to current account
-python scripts/bind_contact.py --phone +8613800138000          # Bind phone (sends OTP, then verifies)
+python scripts/bind_contact.py --bind-email user@example.com                           # Send email activation or complete email bind
+python scripts/bind_contact.py --bind-email user@example.com --wait-for-email-verification
+python scripts/bind_contact.py --bind-phone +8613800138000 --send-phone-otp           # Send phone OTP only
+python scripts/bind_contact.py --bind-phone +8613800138000 --otp-code 123456          # Complete phone bind with a pre-issued OTP
 
 # Messaging (requires identity creation first)
 python scripts/send_message.py --to "<DID>" --content "hello"
@@ -160,7 +163,7 @@ Three-layer architecture: CLI script layer -> Persistence layer -> Core utility 
 - **e2ee_handler.py**: `E2eeHandler` — E2EE transparent handler for WebSocket listener. Intercepts E2EE messages before `classify_message`: protocol messages (init/rekey/error) are handled internally without forwarding, encrypted messages (e2ee_msg) are decrypted and forwarded as plaintext. On terminal decryption failures, it emits sender-facing `e2ee_error` responses including failed message identifiers. asyncio.Lock protects concurrency, periodic state saving
 - **ws_listener.py**: WebSocket listener — persistent background process + cross-platform service lifecycle management. Reuses `WsClient` to connect to molt-message WebSocket. E2EE messages handled transparently by `E2eeHandler` (optional). Received messages stored to local SQLite via `local_store`. Others routed via `classify_message()` (agent/wake/discard) and forwarded to corresponding localhost webhook endpoints. Subcommands: `run` (foreground debug), `install` (install background service), `uninstall`, `start`/`stop`/`status` (management). Service management delegated to `service_manager.py`
 - **service_manager.py**: `ServiceManager` base class + `MacOSServiceManager` (launchd) / `LinuxServiceManager` (systemd) / `WindowsServiceManager` (Task Scheduler) + `get_service_manager()` factory. Handles install/uninstall/start/stop/status for each platform
-- **bind_contact.py**: Contact binding CLI — bind email or phone number to an existing authenticated account via `bind_email_send()`, `bind_phone_send_otp()`, `bind_phone_verify()` from handle.py
+- **bind_contact.py**: Contact binding CLI — bind email or phone number to an existing authenticated account with pure non-interactive flows (`bind_email_send()`, `bind_phone_send_otp()`, `bind_phone_verify()` from handle.py)
 - Other scripts are CLI entry points for each feature, wrapping async calls via `asyncio.run()`
 
 ### service/ — Cross-Platform Service Management

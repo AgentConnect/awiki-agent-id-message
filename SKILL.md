@@ -121,25 +121,27 @@ cd <SKILL_DIR> && python scripts/send_verification_code.py --phone +861380013800
 ```
 Then ask the user for the code they received.
 
-Complete registration by passing the verification code explicitly:
+**Step 3**: Complete registration with the pre-issued code:
 ```bash
 cd <SKILL_DIR> && python scripts/register_handle.py --handle alice --phone +8613800138000 --otp-code 123456
 # Short handles (3-4 chars) also require --invite-code:
 cd <SKILL_DIR> && python scripts/register_handle.py --handle bob --phone +8613800138000 --otp-code 123456 --invite-code ABC123
 ```
-Interactive OTP prompting still works when the CLI is attached to a real TTY.
-In non-interactive environments, use `send_verification_code.py` first and then
-pass `--otp-code`.
+`register_handle.py` is now pure non-interactive in phone mode: it never prompts for OTP input.
 
 **Method 2: Email registration (activation link)**
 
-**Step 2**: Register with email:
+**Step 2**: Start registration with email:
 ```bash
 cd <SKILL_DIR> && python scripts/register_handle.py --handle alice --email user@example.com
 ```
-The script sends an activation email with a verification link to the email address. Tell the user: _"I've sent an activation email to user@example.com. Please check your inbox and click the activation link to verify your email. Let me know when you've done that."_
+If the email is not yet verified, the script sends an activation email and exits with a pending-verification status. Tell the user: _"I've sent an activation email to user@example.com. Please check your inbox and click the activation link. After that, rerun the same command."_
 
-After the user confirms, the script checks the verification status and proceeds with registration automatically. If the email is already verified (from a previous attempt), the script skips the email step.
+If the user wants a single non-interactive command that keeps running until verification completes, use polling mode:
+```bash
+cd <SKILL_DIR> && python scripts/register_handle.py --handle alice --email user@example.com --wait-for-email-verification
+```
+If the email is already verified from a previous attempt, the script skips the send step and registers immediately.
 
 **Step 3**: Verify: `cd <SKILL_DIR> && python scripts/check_status.py`
 
@@ -151,13 +153,17 @@ After registration, users can bind the other contact method (email → phone, or
 ```bash
 cd <SKILL_DIR> && python scripts/bind_contact.py --bind-email user@example.com
 ```
-Sends an activation email. Tell the user to check their inbox and click the link. After confirmation, the email is automatically bound to their account.
+If the email is not yet verified, the script sends an activation email and exits with a pending-verification status. After the user clicks the link, rerun the same command. For automatic polling, use:
+```bash
+cd <SKILL_DIR> && python scripts/bind_contact.py --bind-email user@example.com --wait-for-email-verification
+```
 
 **Bind phone (for user who registered with email):**
 ```bash
-cd <SKILL_DIR> && python scripts/bind_contact.py --bind-phone +8613800138000
+cd <SKILL_DIR> && python scripts/bind_contact.py --bind-phone +8613800138000 --send-phone-otp
+cd <SKILL_DIR> && python scripts/bind_contact.py --bind-phone +8613800138000 --otp-code 123456
 ```
-Sends an SMS verification code. Ask the user for the code they received. The script verifies and binds in one step.
+`bind_contact.py` is now pure non-interactive in phone mode: first send the OTP explicitly, then rerun with `--otp-code`.
 
 ### Option B: DID-Only Registration (No Handle)
 
@@ -175,7 +181,7 @@ cd <SKILL_DIR> && python scripts/resolve_handle.py --did "did:wba:awiki.ai:alice
 
 # Recover a lost Handle (original phone + new DID)
 cd <SKILL_DIR> && python scripts/send_verification_code.py --phone +8613800138000
-cd <SKILL_DIR> && python scripts/recover_handle.py --handle alice --phone +8613800138000 --credential default
+cd <SKILL_DIR> && python scripts/recover_handle.py --handle alice --phone +8613800138000 --otp-code 123456 --credential default
 ```
 
 Handle rules: 1-63 chars, lowercase/digits/hyphens. Reserved names (admin, system, etc.) not allowed. Each DID ↔ one Handle.
@@ -605,7 +611,8 @@ Analysis criteria, recommendation output structure, DM composition guidance, and
 
 **Multi-identity (`--credential`)**: All scripts support `--credential <name>` (default: `default`). Multiple identities can run in parallel — each credential has its own keys, JWT, and E2EE sessions. Tip: use your Handle as the credential name.
 ```bash
-python scripts/register_handle.py --handle alice --phone +8613800138000 --credential alice
+python scripts/send_verification_code.py --phone +8613800138000
+python scripts/register_handle.py --handle alice --phone +8613800138000 --otp-code 123456 --credential alice
 python scripts/register_handle.py --handle bob --email bob@example.com --credential bob
 python scripts/send_message.py --to "did:..." --content "Hi" --credential alice
 ```

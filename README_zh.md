@@ -76,14 +76,18 @@ python3 scripts/setup_identity.py --delete myid
 ### Handle 注册
 
 ```bash
-# 使用手机号注册 Handle
-python3 scripts/register_handle.py --handle alice --phone +8613800138000
+# 先发送验证码，再用手机号注册 Handle
+python3 scripts/send_verification_code.py --phone +8613800138000
+python3 scripts/register_handle.py --handle alice --phone +8613800138000 --otp-code 123456
 
-# 使用邮箱注册 Handle
+# 使用邮箱注册 Handle（先发送激活邮件，点击后再重跑同一命令）
 python3 scripts/register_handle.py --handle alice --email user@example.com
 
+# 或者让命令持续轮询，直到邮箱验证完成
+python3 scripts/register_handle.py --handle alice --email user@example.com --wait-for-email-verification
+
 # 使用邀请码注册
-python3 scripts/register_handle.py --handle bob --phone +8613800138000 --invite-code ABC123
+python3 scripts/register_handle.py --handle bob --phone +8613800138000 --otp-code 123456 --invite-code ABC123
 
 # 解析 Handle 到 DID
 python3 scripts/resolve_handle.py --handle alice

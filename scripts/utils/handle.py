@@ -3,9 +3,10 @@
 [INPUT]: httpx.AsyncClient, SDKConfig, DIDIdentity, rpc_call(), create_identity(), register_did()
 [OUTPUT]: send_otp(), register_handle(), register_handle_with_email(),
           send_email_verification(), check_email_verified(),
+          ensure_email_verification(), wait_for_email_verification(),
           recover_handle(), resolve_handle(), lookup_handle(), normalize_phone(),
           bind_email_send(), bind_phone_send_otp(), bind_phone_verify(),
-          wait_for_email_verification()
+          EmailVerificationResult
 [POS]: Wraps Handle registration and resolution flows, built on top of auth.py and identity.py.
        Uses JSON-RPC 2.0 endpoints: /user-service/handle/rpc and /user-service/did-auth/rpc.
        Uses REST endpoints: /user-service/auth/email-send and /user-service/auth/email-status.
@@ -17,7 +18,10 @@
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import dataclass
 import re
+import time
 from typing import Any
 
 import httpx
@@ -236,16 +240,29 @@ async def check_email_verified(
     return data.get("verified", False), data.get("verified_at")
 
 
-async def wait_for_email_verification(
+@dataclass(frozen=True)
+class EmailVerificationResult:
+    """Result of a non-interactive email verification attempt."""
+
+    verified: bool
+    activation_sent: bool
+    verified_at: str | None = None
+
+
+async def ensure_email_verification(
     client: httpx.AsyncClient,
     email: str,
     send_fn: Any | None = None,
+    *,
+    wait: bool = False,
     timeout: int = 300,
-) -> None:
-    """Send activation email and wait for user to verify it.
+    poll_interval: float = 5.0,
+) -> EmailVerificationResult:
+    """Ensure email verification using a pure non-interactive flow.
 
-    Shared helper that encapsulates the common "send email -> prompt -> check status"
-    flow used by both register_handle.py and bind_contact.py.
+    Shared helper that encapsulates the common "check status -> send email if
+    needed -> optionally poll for verification" flow used by register_handle.py
+    and bind_contact.py.
 
     Args:
         client: HTTP client pointing to user-service.
@@ -253,31 +270,83 @@ async def wait_for_email_verification(
         send_fn: Async callable to send the activation email.
                  If None, uses send_email_verification(client, email).
                  For binding flow, pass a lambda that includes jwt_token.
-        timeout: Not currently used (reserved for future polling support).
+        wait: Whether to poll until the email becomes verified.
+        timeout: Maximum number of seconds to wait when wait=True.
+        poll_interval: Seconds between verification checks when wait=True.
 
     Raises:
         httpx.HTTPStatusError: On HTTP error from send or check calls.
-        SystemExit: If email is not verified after user presses Enter.
+        ValueError: If timeout or poll_interval is invalid.
     """
-    import sys
+    normalized_email = email.strip().lower()
+    verified, verified_at = await check_email_verified(client, normalized_email)
+    if verified:
+        return EmailVerificationResult(
+            verified=True,
+            activation_sent=False,
+            verified_at=verified_at,
+        )
 
-    # 1. Send activation email (always send in binding/registration flows to ensure
-    # the backend receives the correct context such as JWT-bound user_id).
-    print(f"\nSending activation email to {email}...")
+    print(f"\nSending activation email to {normalized_email}...")
     if send_fn is not None:
         await send_fn()
     else:
-        await send_email_verification(client, email)
+        await send_email_verification(client, normalized_email)
     print("Activation email sent. Please check your inbox and click the activation link.")
 
-    # 2. Wait for user to verify
-    input("\nPress Enter after you've verified your email: ")
+    if not wait:
+        return EmailVerificationResult(
+            verified=False,
+            activation_sent=True,
+            verified_at=None,
+        )
 
-    # 3. Check verification status
-    verified, _ = await check_email_verified(client, email)
-    if not verified:
-        print("Email not yet verified. Please click the activation link first.")
-        sys.exit(1)
+    if timeout < 0:
+        raise ValueError("email verification timeout must be >= 0 seconds.")
+    if poll_interval <= 0:
+        raise ValueError("email verification poll interval must be > 0 seconds.")
+
+    print(
+        "Waiting for email verification "
+        f"(timeout: {timeout}s, poll interval: {poll_interval:g}s)..."
+    )
+    deadline = time.monotonic() + timeout
+    while True:
+        verified, verified_at = await check_email_verified(client, normalized_email)
+        if verified:
+            return EmailVerificationResult(
+                verified=True,
+                activation_sent=True,
+                verified_at=verified_at,
+            )
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return EmailVerificationResult(
+                verified=False,
+                activation_sent=True,
+                verified_at=None,
+            )
+
+        await asyncio.sleep(min(poll_interval, remaining))
+
+
+async def wait_for_email_verification(
+    client: httpx.AsyncClient,
+    email: str,
+    send_fn: Any | None = None,
+    timeout: int = 300,
+    poll_interval: float = 5.0,
+) -> EmailVerificationResult:
+    """Backward-compatible wrapper for fully waiting on email verification."""
+    return await ensure_email_verification(
+        client,
+        email,
+        send_fn=send_fn,
+        wait=True,
+        timeout=timeout,
+        poll_interval=poll_interval,
+    )
 
 
 async def register_handle_with_email(
@@ -512,12 +581,14 @@ async def lookup_handle(
 
 
 __all__ = [
+    "EmailVerificationResult",
     "normalize_phone",
     "send_otp",
     "register_handle",
     "register_handle_with_email",
     "send_email_verification",
     "check_email_verified",
+    "ensure_email_verification",
     "wait_for_email_verification",
     "recover_handle",
     "resolve_handle",

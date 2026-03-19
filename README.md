@@ -76,14 +76,18 @@ python3 scripts/setup_identity.py --delete myid
 ### Handle Registration
 
 ```bash
-# Register a handle with phone verification
-python3 scripts/register_handle.py --handle alice --phone +8613800138000
+# Send OTP first, then register a handle with phone verification
+python3 scripts/send_verification_code.py --phone +8613800138000
+python3 scripts/register_handle.py --handle alice --phone +8613800138000 --otp-code 123456
 
-# Register a handle with email verification
+# Register a handle with email verification (sends the activation email, then rerun after clicking)
 python3 scripts/register_handle.py --handle alice --email user@example.com
 
+# Or keep polling until the activation link is clicked
+python3 scripts/register_handle.py --handle alice --email user@example.com --wait-for-email-verification
+
 # Register with an invite code
-python3 scripts/register_handle.py --handle bob --phone +8613800138000 --invite-code ABC123
+python3 scripts/register_handle.py --handle bob --phone +8613800138000 --otp-code 123456 --invite-code ABC123
 
 # Resolve a handle to DID
 python3 scripts/resolve_handle.py --handle alice

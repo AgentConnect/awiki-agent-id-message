@@ -1,23 +1,24 @@
 """Register a Handle (human-readable DID alias).
 
 Usage:
-    # Register with phone (will prompt for OTP)
-    uv run python scripts/register_handle.py --handle alice --phone +8613800138000
+    # Send OTP first, then register with phone
+    uv run python scripts/send_verification_code.py --phone +8613800138000
+    uv run python scripts/register_handle.py --handle alice --phone +8613800138000 --otp-code 123456
 
-    # Register with email (email must be verified via activation link first)
+    # Register with email (pure non-interactive flow)
     uv run python scripts/register_handle.py --handle alice --email user@example.com
+    uv run python scripts/register_handle.py --handle alice --email user@example.com --wait-for-email-verification
 
     # With invite code (for short handles <= 4 chars)
-    uv run python scripts/register_handle.py --handle bob --phone +8613800138000 --invite-code ABC123
+    uv run python scripts/register_handle.py --handle bob --phone +8613800138000 --otp-code 123456 --invite-code ABC123
 
     # Specify credential name
-    uv run python scripts/register_handle.py --handle alice --phone +8613800138000 --credential myhandle
+    uv run python scripts/register_handle.py --handle alice --phone +8613800138000 --otp-code 123456 --credential myhandle
 
 [INPUT]: SDK (handle registration, OTP, email verification), credential_store (save identity),
          logging_config
 [OUTPUT]: Register Handle + DID identity and save credentials
-[POS]: Interactive CLI for Handle registration (supports phone SMS or email verification),
-       with interactive OTP prompt only when stdin is a real TTY
+[POS]: Pure non-interactive CLI for Handle registration (phone OTP or email activation link)
 
 [PROTOCOL]:
 1. Update this header when logic changes
@@ -31,15 +32,16 @@ import sys
 
 import httpx
 
-from utils import SDKConfig, create_user_service_client, send_otp, register_handle
+from utils import SDKConfig, create_user_service_client, register_handle
 from utils.handle import (
+    ensure_email_verification,
     register_handle_with_email,
-    wait_for_email_verification,
 )
 from utils.logging_config import configure_logging
 from credential_store import save_identity
 
 logger = logging.getLogger(__name__)
+PENDING_VERIFICATION_EXIT_CODE = 3
 
 
 async def do_register(
@@ -50,15 +52,20 @@ async def do_register(
     invite_code: str | None = None,
     name: str | None = None,
     credential_name: str = "default",
-) -> None:
-    """Register a Handle interactively (phone or email)."""
+    wait_for_email_verification: bool = False,
+    email_verification_timeout: int = 300,
+    email_poll_interval: float = 5.0,
+) -> bool:
+    """Register a Handle with a pure non-interactive flow."""
     logger.info(
-        "Registering handle handle=%s credential=%s phone=%s email=%s invite_code_present=%s",
+        "Registering handle handle=%s credential=%s phone=%s email=%s "
+        "invite_code_present=%s wait_for_email_verification=%s",
         handle,
         credential_name,
         bool(phone),
         bool(email),
         bool(invite_code),
+        wait_for_email_verification,
     )
     config = SDKConfig.load()
     print(f"Service configuration:")
@@ -71,18 +78,27 @@ async def do_register(
 
     async with create_user_service_client(config) as client:
         if email:
-            # === Email registration flow ===
             identity = await _register_with_email(
-                client, config, handle, email, invite_code, name,
+                client,
+                config,
+                handle,
+                email,
+                invite_code,
+                name,
+                wait_for_verification=wait_for_email_verification,
+                verification_timeout=email_verification_timeout,
+                poll_interval=email_poll_interval,
             )
         elif phone:
-            # === Phone registration flow (existing) ===
             identity = await _register_with_phone(
                 client, config, handle, phone, otp_code, invite_code, name,
             )
         else:
             print("Error: either --phone or --email is required.")
             sys.exit(1)
+
+        if identity is None:
+            return False
 
         print(f"  Handle    : {handle}.{config.did_domain}")
         print(f"  DID       : {identity.did}")
@@ -107,25 +123,16 @@ async def do_register(
         )
         print(f"\nCredential saved to: {path}")
         print(f"Credential name: {credential_name}")
+        return True
 
 
 async def _register_with_phone(client, config, handle, phone, otp_code, invite_code, name):
-    """Phone-based registration (existing flow)."""
+    """Phone-based registration with a pre-issued OTP code."""
     if otp_code is None:
-        # Only allow interactive OTP when stdin is a real TTY. In non-interactive
-        # contexts the OTP must be provided explicitly so that automation can
-        # reuse a pre-sent code.
-        if not sys.stdin.isatty():
-            raise ValueError(
-                "OTP code is required in non-interactive mode. "
-                f"First run: python scripts/send_verification_code.py --phone {phone}"
-            )
-        print(f"\nSending OTP to {phone}...")
-        await send_otp(client, phone)
-        print("OTP sent. Check your phone.")
-        otp_code = input("Enter OTP code: ").strip()
-        if not otp_code:
-            raise ValueError("OTP code is required.")
+        raise ValueError(
+            "OTP code is required. "
+            f"First run: uv run python scripts/send_verification_code.py --phone {phone}"
+        )
 
     print(f"\nRegistering Handle '{handle}'...")
     return await register_handle(
@@ -140,13 +147,46 @@ async def _register_with_phone(client, config, handle, phone, otp_code, invite_c
     )
 
 
-async def _register_with_email(client, config, handle, email, invite_code, name):
-    """Email-based registration (new flow)."""
+async def _register_with_email(
+    client,
+    config,
+    handle,
+    email,
+    invite_code,
+    name,
+    *,
+    wait_for_verification: bool,
+    verification_timeout: int,
+    poll_interval: float,
+):
+    """Email-based registration with optional polling."""
     try:
-        await wait_for_email_verification(client, email)
+        verification_result = await ensure_email_verification(
+            client,
+            email,
+            wait=wait_for_verification,
+            timeout=verification_timeout,
+            poll_interval=poll_interval,
+        )
     except (httpx.HTTPStatusError, httpx.RequestError) as e:
         print(f"Failed to send activation email: {e}")
         sys.exit(1)
+    except ValueError as e:
+        raise ValueError(str(e)) from e
+
+    if not verification_result.verified:
+        if wait_for_verification:
+            print(
+                "Email verification timed out. Click the activation link and rerun "
+                "the same command, or increase --email-verification-timeout."
+            )
+        else:
+            print(
+                "Email verification pending. Click the activation link, then rerun "
+                "the same command. Or pass --wait-for-email-verification to poll "
+                "automatically."
+            )
+        return None
 
     print(f"\nEmail verified. Registering Handle '{handle}'...")
     return await register_handle_with_email(
@@ -177,13 +217,30 @@ def main() -> None:
                             help="Email address (will send activation link if not yet verified)")
 
     parser.add_argument("--otp-code", type=str, default=None,
-                        help="OTP code (phone mode only; if already obtained)")
+                        help="Pre-issued OTP code (phone mode only; required for non-interactive use)")
     parser.add_argument("--invite-code", type=str, default=None,
                         help="Invite code (required for short handles <= 4 chars)")
     parser.add_argument("--name", type=str, default=None,
                         help="Display name (defaults to handle)")
     parser.add_argument("--credential", type=str, default="default",
                         help="Credential storage name (default: default)")
+    parser.add_argument(
+        "--wait-for-email-verification",
+        action="store_true",
+        help="Poll until the activation link is clicked instead of exiting immediately",
+    )
+    parser.add_argument(
+        "--email-verification-timeout",
+        type=int,
+        default=300,
+        help="Seconds to wait when --wait-for-email-verification is set (default: 300)",
+    )
+    parser.add_argument(
+        "--email-poll-interval",
+        type=float,
+        default=5.0,
+        help="Polling interval in seconds for email verification (default: 5.0)",
+    )
 
     args = parser.parse_args()
     logger.info(
@@ -192,7 +249,7 @@ def main() -> None:
         args.credential,
     )
     try:
-        asyncio.run(
+        completed = asyncio.run(
             do_register(
                 handle=args.handle,
                 phone=args.phone,
@@ -201,8 +258,13 @@ def main() -> None:
                 invite_code=args.invite_code,
                 name=args.name,
                 credential_name=args.credential,
+                wait_for_email_verification=args.wait_for_email_verification,
+                email_verification_timeout=args.email_verification_timeout,
+                email_poll_interval=args.email_poll_interval,
             )
         )
+        if not completed:
+            raise SystemExit(PENDING_VERIFICATION_EXIT_CODE)
     except ValueError as exc:
         parser.exit(status=2, message=f"Error: {exc}\n")
 
