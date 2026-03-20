@@ -1,7 +1,8 @@
-"""Unit tests for check_inbox CLI routing and scope filtering.
+"""Unit tests for check_inbox CLI routing, scope filtering, and auto-mark-read.
 
 [INPUT]: check_inbox CLI helpers, monkeypatched async entrypoints, and CLI argv
-[OUTPUT]: Regression coverage for inbox scope filtering and group-history dispatch
+[OUTPUT]: Regression coverage for inbox scope filtering, auto-mark-read,
+          and group-history dispatch
 [POS]: Message CLI unit tests for unified direct/group inbox behavior
 
 [PROTOCOL]:
@@ -11,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -22,6 +24,16 @@ if str(_scripts_dir) not in sys.path:
 
 import check_inbox as check_inbox_cli  # noqa: E402
 import local_store  # noqa: E402
+
+
+class _DummyAsyncClient:
+    """Minimal async context manager used by mocked inbox RPC tests."""
+
+    async def __aenter__(self) -> "_DummyAsyncClient":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        del exc_type, exc, tb
 
 
 class TestCheckInboxCli:
@@ -166,6 +178,7 @@ class TestCheckInboxCli:
                     "credential_name": credential_name,
                     "limit": limit,
                     "scope": scope,
+                    "mark_read": False,
                 }
             )
 
@@ -193,6 +206,95 @@ class TestCheckInboxCli:
             "credential_name": "bob",
             "limit": 40,
             "scope": "group",
+            "mark_read": False,
+        }
+
+    def test_main_dispatches_inbox_auto_mark_read(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        async def _fake_check_inbox(
+            credential_name: str,
+            limit: int,
+            scope: str,
+            mark_read: bool = False,
+        ) -> None:
+            captured.update(
+                {
+                    "credential_name": credential_name,
+                    "limit": limit,
+                    "scope": scope,
+                    "mark_read": mark_read,
+                }
+            )
+
+        monkeypatch.setattr(
+            check_inbox_cli, "configure_logging", lambda **kwargs: None
+        )
+        monkeypatch.setattr(check_inbox_cli, "check_inbox", _fake_check_inbox)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "check_inbox.py",
+                "--credential",
+                "bob",
+                "--mark-read",
+                "--limit",
+                "15",
+            ],
+        )
+
+        check_inbox_cli.main()
+
+        assert captured == {
+            "credential_name": "bob",
+            "limit": 15,
+            "scope": "all",
+            "mark_read": True,
+        }
+
+    def test_main_dispatches_explicit_mark_read_ids(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        async def _fake_mark_read(
+            message_ids: list[str],
+            credential_name: str,
+        ) -> None:
+            captured.update(
+                {
+                    "message_ids": message_ids,
+                    "credential_name": credential_name,
+                }
+            )
+
+        monkeypatch.setattr(
+            check_inbox_cli, "configure_logging", lambda **kwargs: None
+        )
+        monkeypatch.setattr(check_inbox_cli, "mark_read", _fake_mark_read)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "check_inbox.py",
+                "--credential",
+                "bob",
+                "--mark-read",
+                "msg_1",
+                "msg_2",
+            ],
+        )
+
+        check_inbox_cli.main()
+
+        assert captured == {
+            "message_ids": ["msg_1", "msg_2"],
+            "credential_name": "bob",
         }
 
     def test_main_rejects_since_seq_without_group_history(
@@ -344,3 +446,99 @@ class TestCheckInboxCli:
         )
 
         assert captured["params"] == {"group_id": "grp_1", "limit": 30, "since_seq": 22}
+
+    def test_check_inbox_auto_marks_visible_messages_as_read(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        marked_message_ids: list[str] = []
+
+        async def _fake_authenticated_rpc_call(
+            client,
+            endpoint: str,
+            method: str,
+            params: dict[str, object],
+            *,
+            auth: object,
+            credential_name: str,
+        ) -> dict[str, object]:
+            del client, endpoint, auth, credential_name
+            if method == "get_inbox":
+                return {
+                    "messages": [
+                        {
+                            "id": "plain-1",
+                            "type": "text",
+                            "sender_did": "did:bob",
+                            "content": "hello",
+                        },
+                        {
+                            "id": "cipher-1",
+                            "type": "e2ee_msg",
+                            "sender_did": "did:bob",
+                            "content": '{"session_id":"sess-1"}',
+                        },
+                    ],
+                    "total": 2,
+                }
+            if method == "mark_read":
+                marked_message_ids.extend(params["message_ids"])  # type: ignore[index]
+                return {"updated_count": len(params["message_ids"])}  # type: ignore[index]
+            raise AssertionError(f"Unexpected method: {method}")
+
+        async def _fake_auto_process_e2ee_messages(
+            messages: list[dict[str, object]],
+            *,
+            local_did: str,
+            auth: object,
+            credential_name: str,
+        ) -> tuple[list[dict[str, object]], list[str], object]:
+            del local_did, auth, credential_name
+            return messages, ["cipher-1"], object()
+
+        monkeypatch.setattr(
+            check_inbox_cli,
+            "create_authenticator",
+            lambda credential_name, config: (object(), {"did": "did:alice"}),
+        )
+        monkeypatch.setattr(
+            check_inbox_cli,
+            "create_molt_message_client",
+            lambda config: _DummyAsyncClient(),
+        )
+        monkeypatch.setattr(
+            check_inbox_cli,
+            "authenticated_rpc_call",
+            _fake_authenticated_rpc_call,
+        )
+        monkeypatch.setattr(
+            check_inbox_cli,
+            "_store_inbox_messages",
+            lambda credential_name, my_did, inbox: None,
+        )
+        monkeypatch.setattr(
+            check_inbox_cli,
+            "_auto_process_e2ee_messages",
+            _fake_auto_process_e2ee_messages,
+        )
+        monkeypatch.setattr(
+            check_inbox_cli,
+            "_mark_local_messages_read",
+            lambda credential_name, owner_did, message_ids: None,
+        )
+
+        import asyncio
+
+        asyncio.run(
+            check_inbox_cli.check_inbox(
+                credential_name="alice",
+                limit=20,
+                scope="all",
+                mark_read=True,
+            )
+        )
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["total"] == 2
+        assert marked_message_ids == ["cipher-1", "plain-1"]

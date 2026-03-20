@@ -16,16 +16,20 @@ Usage:
     # View one group's message history directly
     uv run python scripts/check_inbox.py --group-id grp_123 --limit 50
 
-    # Mark messages as read
+    # Fetch inbox and also mark the returned messages as read
+    uv run python scripts/check_inbox.py --mark-read
+
+    # Mark specific message IDs as read
     uv run python scripts/check_inbox.py --mark-read msg_id_1 msg_id_2
 
 [INPUT]: SDK (RPC calls), credential_store (load identity credentials), local_store,
          E2EE runtime helpers, group RPC history reads, outbox tracking,
          logging_config
 [OUTPUT]: Inbox message list / private-or-group history / mark-read result,
-          with immediate private E2EE protocol processing, plaintext decryption
-          when possible, local group snapshot persistence, and automatic local
-          incremental cursors for group history reads
+          with optional auto-mark-read during inbox fetches, immediate private
+          E2EE protocol processing, plaintext decryption when possible, local
+          group snapshot persistence, and automatic local incremental cursors
+          for group history reads
 [POS]: Unified message receiving and history script for private chats and
        discovery-group reads
 
@@ -71,6 +75,46 @@ _E2EE_SESSION_SETUP_TYPES = {"e2ee_init", "e2ee_rekey"}
 _E2EE_TYPE_ORDER = {"e2ee_init": 0, "e2ee_ack": 1, "e2ee_rekey": 2, "e2ee_msg": 3, "e2ee_error": 4}
 _E2EE_USER_NOTICE = "This is an encrypted message."
 _MESSAGE_SCOPES = {"all", "direct", "group"}
+
+
+def _message_id(message: dict[str, Any]) -> str | None:
+    """Return one stable message ID if present."""
+    for key in ("id", "msg_id"):
+        value = message.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _merge_message_ids(*message_id_groups: list[str]) -> list[str]:
+    """Merge message IDs while preserving their first-seen order."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in message_id_groups:
+        for message_id in group:
+            if not message_id or message_id in seen:
+                continue
+            seen.add(message_id)
+            merged.append(message_id)
+    return merged
+
+
+def _collect_readable_message_ids(
+    messages: list[dict[str, Any]],
+    *,
+    local_did: str | None = None,
+) -> list[str]:
+    """Collect incoming message IDs that can be marked as read."""
+    collected: list[str] = []
+    for message in messages:
+        message_id = _message_id(message)
+        if not message_id:
+            continue
+        sender_did = message.get("sender_did")
+        if local_did and isinstance(sender_did, str) and sender_did == local_did:
+            continue
+        collected.append(message_id)
+    return _merge_message_ids(collected)
 
 
 def _message_time_value(message: dict[str, Any]) -> str:
@@ -381,8 +425,9 @@ async def check_inbox(
     credential_name: str = "default",
     limit: int = 20,
     scope: str = "all",
+    mark_read: bool = False,
 ) -> None:
-    """View inbox and immediately process private E2EE messages when possible."""
+    """View inbox and optionally mark returned messages as read."""
     config = SDKConfig()
     auth_result = create_authenticator(credential_name, config)
     if auth_result is None:
@@ -416,14 +461,29 @@ async def check_inbox(
         inbox["total"] = len(rendered_messages)
         inbox["scope"] = scope
 
-        if processed_ids:
+        ids_to_mark = processed_ids
+        if mark_read:
+            ids_to_mark = _merge_message_ids(
+                processed_ids,
+                _collect_readable_message_ids(
+                    rendered_messages,
+                    local_did=str(data["did"]),
+                ),
+            )
+
+        if ids_to_mark:
             await authenticated_rpc_call(
                 client,
                 MESSAGE_RPC,
                 "mark_read",
-                params={"user_did": data["did"], "message_ids": processed_ids},
+                params={"user_did": data["did"], "message_ids": ids_to_mark},
                 auth=auth,
                 credential_name=credential_name,
+            )
+            _mark_local_messages_read(
+                credential_name=credential_name,
+                owner_did=str(data["did"]),
+                message_ids=ids_to_mark,
             )
 
         print(json.dumps(inbox, indent=2, ensure_ascii=False))
@@ -543,8 +603,47 @@ async def mark_read(
             auth=auth,
             credential_name=credential_name,
         )
+        _mark_local_messages_read(
+            credential_name=credential_name,
+            owner_did=str(data["did"]),
+            message_ids=message_ids,
+        )
         print("Marked as read successfully:", file=sys.stderr)
         print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def _mark_local_messages_read(
+    *,
+    credential_name: str,
+    owner_did: str,
+    message_ids: list[str],
+) -> None:
+    """Mark locally cached messages as read on a best-effort basis."""
+    normalized_message_ids = _merge_message_ids(message_ids)
+    if not normalized_message_ids:
+        return
+
+    conn = None
+    try:
+        conn = local_store.get_connection()
+        local_store.ensure_schema(conn)
+        placeholders = ", ".join(["?"] * len(normalized_message_ids))
+        conn.execute(
+            f"""
+            UPDATE messages
+            SET is_read = 1
+            WHERE owner_did = ?
+              AND credential_name = ?
+              AND msg_id IN ({placeholders})
+            """,
+            [owner_did, credential_name, *normalized_message_ids],
+        )
+        conn.commit()
+    except Exception:
+        logger.debug("Failed to mark local messages as read", exc_info=True)
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _store_inbox_messages(
@@ -713,9 +812,10 @@ def main() -> None:
     action.add_argument("--group-id", type=str, help="View one group's message history")
     action.add_argument(
         "--mark-read",
-        nargs="+",
+        nargs="*",
         type=str,
-        help="Mark specified message IDs as read",
+        help="Without IDs: fetch inbox and also mark returned messages as read. "
+             "With IDs: mark the specified message IDs as read.",
     )
     parser.add_argument(
         "--scope",
@@ -739,10 +839,13 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.mark_read:
+    if args.mark_read is not None:
         if args.since_seq is not None:
             parser.error("--since-seq only supports group history reads")
-        asyncio.run(mark_read(args.mark_read, args.credential))
+        if args.mark_read:
+            asyncio.run(mark_read(args.mark_read, args.credential))
+        else:
+            asyncio.run(check_inbox(args.credential, args.limit, args.scope, mark_read=True))
     elif args.group_id:
         asyncio.run(
             get_group_history(

@@ -275,11 +275,12 @@ cd <SKILL_DIR> && python scripts/manage_group.py --post-message --group-id GID -
 
 ```bash
 cd <SKILL_DIR> && python scripts/check_inbox.py                                          # Mixed inbox
+cd <SKILL_DIR> && python scripts/check_inbox.py --mark-read                              # Fetch inbox and auto-mark returned messages as read
 cd <SKILL_DIR> && python scripts/check_inbox.py --history "did:wba:awiki.ai:user:bob"    # Chat history
 cd <SKILL_DIR> && python scripts/check_inbox.py --scope group                             # Group messages only
 cd <SKILL_DIR> && python scripts/check_inbox.py --group-id GROUP_ID                       # One group (incremental)
 cd <SKILL_DIR> && python scripts/check_inbox.py --group-id GROUP_ID --since-seq 120       # Manual cursor
-cd <SKILL_DIR> && python scripts/check_inbox.py --mark-read msg_id_1 msg_id_2             # Mark read
+cd <SKILL_DIR> && python scripts/check_inbox.py --mark-read msg_id_1 msg_id_2             # Mark specific messages as read
 ```
 
 ### Querying Local Database
@@ -293,6 +294,7 @@ All received messages / contacts / groups / group_members / relationshipare stor
 cd <SKILL_DIR> && python scripts/query_db.py "SELECT * FROM threads ORDER BY last_message_at DESC LIMIT 20"
 cd <SKILL_DIR> && python scripts/query_db.py "SELECT sender_name, content, sent_at FROM messages WHERE content LIKE '%meeting%' ORDER BY sent_at DESC LIMIT 10"
 cd <SKILL_DIR> && python scripts/query_db.py "SELECT did, name, handle, relationship FROM contacts"
+cd <SKILL_DIR> && python scripts/query_db.py "SELECT g.name AS group_name, COALESCE(c.handle, m.sender_name, m.sender_did) AS sender, m.content, m.sent_at FROM messages m LEFT JOIN groups g ON g.owner_did = m.owner_did AND g.group_id = m.group_id LEFT JOIN contacts c ON c.owner_did = m.owner_did AND c.did = m.sender_did WHERE m.group_id IS NOT NULL AND m.content_type = 'group_user' ORDER BY COALESCE(m.server_seq, 0) DESC, COALESCE(m.sent_at, m.stored_at) DESC LIMIT 20"
 ```
 
 Full query examples: `<SKILL_DIR>/references/local-store-schema.md`

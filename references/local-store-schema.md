@@ -259,6 +259,22 @@ Useful starter queries:
   WHERE owner_did = 'did:me' AND group_id = 'grp_xxx' AND content_type = 'group_user'
   ORDER BY COALESCE(server_seq, 0), COALESCE(sent_at, stored_at);
   ```
+- Inspect one group's messages together with group name and best-effort sender handle:
+  ```sql
+  SELECT g.name AS group_name,
+         COALESCE(c.handle, m.sender_name, m.sender_did) AS sender,
+         m.content,
+         m.sent_at
+  FROM messages m
+  LEFT JOIN groups g
+    ON g.owner_did = m.owner_did AND g.group_id = m.group_id
+  LEFT JOIN contacts c
+    ON c.owner_did = m.owner_did AND c.did = m.sender_did
+  WHERE m.owner_did = 'did:me'
+    AND m.group_id = 'grp_xxx'
+    AND m.content_type = 'group_user'
+  ORDER BY COALESCE(m.server_seq, 0), COALESCE(m.sent_at, m.stored_at);
+  ```
 - Inspect one group's system events:
   ```sql
   SELECT msg_id, content_type, content, metadata, server_seq, sent_at
@@ -283,6 +299,9 @@ Useful starter queries:
   WHERE owner_did = 'did:me' AND event_type = 'ai_recommended' AND status = 'pending'
   ORDER BY created_at DESC;
   ```
+
+Common pitfall: `messages` does **not** expose `group_name`, `sender_handle`, or
+`type` columns. Use `groups.name`, `contacts.handle`, and `messages.content_type`.
 
 ## Safety Rules (execute_sql)
 
