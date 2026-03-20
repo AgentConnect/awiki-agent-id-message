@@ -34,6 +34,7 @@ import os
 import signal
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -179,6 +180,90 @@ def _build_event_text(params: dict[str, Any], route: str, cfg: ListenerConfig) -
         return f"[IM] {sender}: {content_preview}"
 
 
+_CHANNEL_ACTIVE_HOURS = 5  # only forward to channels active within this window
+
+
+async def _fetch_external_channels() -> list[tuple[str, str]]:
+    """Query OpenClaw gateway for active external channel sessions.
+
+    Returns list of (channel, target) tuples parsed from session keys.
+    Only includes channels active within the last ``_CHANNEL_ACTIVE_HOURS`` hours.
+    Filters out TUI (key ends with :main) and hook sessions.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _OPENCLAW_BIN, "gateway", "call", "status", "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+        if proc.returncode != 0:
+            logger.warning("gateway status failed: exit=%d", proc.returncode)
+            return []
+        stdout_str = stdout.decode()
+        # openclaw prints plugin logs to stdout before JSON; find the JSON object
+        json_start = stdout_str.find("{")
+        if json_start < 0:
+            logger.warning("gateway status: no JSON in output")
+            return []
+        data = json.loads(stdout_str[json_start:])
+        now_ms = time.time() * 1000
+        max_age_ms = _CHANNEL_ACTIVE_HOURS * 3600 * 1000
+        channels: list[tuple[str, str]] = []
+        for session in data.get("sessions", {}).get("recent", []):
+            key = session.get("key", "")
+            # Skip TUI and hook sessions
+            if key.endswith(":main") or "hook:" in key:
+                continue
+            # Check activity window
+            updated_at = session.get("updatedAt", 0)
+            age_ms = now_ms - updated_at
+            if age_ms > max_age_ms:
+                logger.debug("Skipping stale channel: %s (age=%.1fh)", key, age_ms / 3600000)
+                continue
+            # Parse: agent:<agentId>:<channel>:<type>:<target...>
+            parts = key.split(":")
+            if len(parts) >= 5:
+                channel = parts[2]
+                target = ":".join(parts[4:])
+                channels.append((channel, target))
+        return channels
+    except Exception as exc:
+        logger.warning("Failed to fetch external channels: %s", exc)
+        return []
+
+
+async def _send_to_channels(text: str, channels: list[tuple[str, str]], msg_seq: int = 0) -> None:
+    """Forward message text to external channels via openclaw message send."""
+    tag = f"[#{msg_seq}] " if msg_seq else ""
+    for channel, target in channels:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                _OPENCLAW_BIN, "message", "send",
+                "--channel", channel,
+                "--target", target,
+                "--message", text,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+            if proc.returncode == 0:
+                logger.info("%s%s OK -> %s", tag, channel, target)
+            else:
+                stderr_str = stderr.decode().strip() if stderr else ""
+                logger.warning(
+                    "%s%s FAIL -> %s exit=%d stderr=%s",
+                    tag, channel, target, proc.returncode, stderr_str[:200],
+                )
+        except asyncio.TimeoutError:
+            logger.warning("%s%s FAIL -> %s timeout", tag, channel, target)
+        except FileNotFoundError:
+            logger.warning("openclaw CLI not found at %s", _OPENCLAW_BIN)
+            break
+        except Exception as exc:
+            logger.error("%s%s FAIL -> %s: %s", tag, channel, target, exc)
+
+
 async def _forward(
     http: httpx.AsyncClient,
     url: str,
@@ -186,19 +271,14 @@ async def _forward(
     params: dict[str, Any],
     route: str,
     cfg: ListenerConfig,
+    channels: list[tuple[str, str]] | None = None,
+    msg_seq: int = 0,
 ) -> bool:
-    """Forward a message to OpenClaw via ``chat.inject`` + HTTP ``/hooks/wake``.
-
-    Uses ``openclaw gateway call chat.inject`` which appends an assistant note
-    directly to the TUI transcript and broadcasts it to connected clients —
-    no model call, zero token cost, instant display.
-
-    Also calls HTTP ``/hooks/wake`` to trigger heartbeat, which handles
-    external channel delivery (Telegram, WhatsApp, etc.) when configured.
-    """
+    """Forward a message to OpenClaw via ``chat.inject`` + HTTP ``/hooks/wake`` + external channels."""
     e2ee_tag = "[E2EE] " if params.get("_e2ee") else ""
     sender = _truncate_did(params.get("sender_did", "unknown"))
     text = _build_event_text(params, route, cfg)
+    tag = f"[#{msg_seq}] " if msg_seq else ""
 
     # Primary: chat.inject (direct TUI injection, no model call)
     inject_ok = False
@@ -218,44 +298,46 @@ async def _forward(
 
         if proc.returncode == 0 and "ok" in stdout_str.lower():
             logger.info(
-                "%sForward success (chat.inject) route=%s sender=%s",
-                e2ee_tag, route, sender,
+                "%s%sTUI OK (chat.inject) sender=%s",
+                tag, e2ee_tag, sender,
             )
             inject_ok = True
         else:
             stderr_str = stderr.decode().strip() if stderr else ""
             logger.warning(
-                "%schat.inject failed route=%s exit=%d stdout=%s stderr=%s",
-                e2ee_tag, route, proc.returncode, stdout_str[:200], stderr_str[:200],
+                "%s%sTUI FAIL (chat.inject) exit=%d stderr=%s",
+                tag, e2ee_tag, proc.returncode, stderr_str[:200],
             )
     except asyncio.TimeoutError:
-        logger.warning("chat.inject timed out route=%s sender=%s", route, sender)
+        logger.warning("%sTUI FAIL (chat.inject) timeout", tag)
     except FileNotFoundError:
         logger.warning("openclaw CLI not found at %s", _OPENCLAW_BIN)
     except Exception as exc:
-        logger.error("chat.inject error route=%s: %s", route, exc)
+        logger.error("%sTUI FAIL (chat.inject) %s", tag, exc)
 
-    # HTTP /hooks/wake — also triggers heartbeat for external channel delivery
-    # (e.g. Telegram, WhatsApp).  When chat.inject succeeded this is a
-    # best-effort supplement; when it failed this is the primary fallback.
-    headers: dict[str, str] = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    body = {"text": text, "mode": "now"}
-    try:
-        resp = await http.post(url, json=body, headers=headers)
-        if resp.is_success:
-            logger.info(
-                "%sForward success (HTTP wake) route=%s sender=%s [%d]",
-                e2ee_tag, route, sender, resp.status_code,
-            )
-        else:
-            logger.warning(
-                "%sForward failed (HTTP wake) route=%s [%d] %s",
-                e2ee_tag, route, resp.status_code, resp.text[:200],
-            )
-    except httpx.HTTPError as exc:
-        logger.warning("Forward error (HTTP wake) route=%s: %s", route, exc)
+    # # HTTP /hooks/wake — triggers heartbeat (disabled: TUI + channel send cover delivery)
+    # headers: dict[str, str] = {"Content-Type": "application/json"}
+    # if token:
+    #     headers["Authorization"] = f"Bearer {token}"
+    # body = {"text": text, "mode": "now"}
+    # try:
+    #     resp = await http.post(url, json=body, headers=headers)
+    #     if resp.is_success:
+    #         logger.info(
+    #             "%s%sWake OK [%d] sender=%s",
+    #             tag, e2ee_tag, resp.status_code, sender,
+    #         )
+    #     else:
+    #         logger.warning(
+    #             "%s%sWake FAIL [%d] %s",
+    #             tag, e2ee_tag, resp.status_code, resp.text[:200],
+    #         )
+    # except httpx.HTTPError as exc:
+    #     logger.warning("%sWake FAIL %s", tag, exc)
+
+    # External channels: forward to Feishu, Telegram, etc.
+    if channels:
+        await _send_to_channels(text, channels, msg_seq)
 
     return inject_ok
 
@@ -378,10 +460,20 @@ async def listen_loop(
                     delay = cfg.reconnect_base_delay
                     logger.info("WebSocket connected successfully")
 
+                    # Discover external channels (Feishu, Telegram, etc.)
+                    ext_channels = await _fetch_external_channels()
+                    if ext_channels:
+                        logger.info(
+                            "External channels discovered: %s",
+                            ", ".join(f"{ch}:{tgt}" for ch, tgt in ext_channels),
+                        )
+
                     ping_event = asyncio.Event()
                     heartbeat = asyncio.create_task(
                         _heartbeat_task(ws, cfg.heartbeat_interval, ping_event),
                     )
+
+                    msg_seq = 0  # per-connection message sequence number
 
                     while True:
                         notification = await ws.receive_notification(timeout=5.0)
@@ -410,9 +502,11 @@ async def listen_loop(
                         params = notification.get("params", {})
                         msg_type = params.get("type", "text")
                         sender_did = params.get("sender_did", "")
+                        msg_seq += 1
+                        content_preview = str(params.get("content", ""))[:80]
                         logger.info(
-                            "Received message: type=%s sender=%s",
-                            msg_type, _truncate_did(sender_did),
+                            "[#%d] Received: type=%s sender=%s content=%s",
+                            msg_seq, msg_type, _truncate_did(sender_did), content_preview,
                         )
 
                         # E2EE message interception (before classify_message)
@@ -470,8 +564,8 @@ async def listen_loop(
                         # Original routing logic
                         route = classify_message(params, my_did, cfg)
                         logger.info(
-                            "Route: %s sender=%s type=%s e2ee=%s",
-                            route or "DROP", _truncate_did(params.get("sender_did", "")),
+                            "[#%d] Route: %s sender=%s type=%s e2ee=%s",
+                            msg_seq, route or "DROP", _truncate_did(params.get("sender_did", "")),
                             params.get("type", ""), bool(params.get("_e2ee")),
                         )
 
@@ -546,8 +640,8 @@ async def listen_loop(
 
                         if route is None:
                             logger.info(
-                                "Dropping message: sender=%s type=%s",
-                                _truncate_did(params.get("sender_did", "")),
+                                "[#%d] Dropped: sender=%s type=%s",
+                                msg_seq, _truncate_did(params.get("sender_did", "")),
                                 params.get("type", ""),
                             )
                             continue
@@ -555,10 +649,10 @@ async def listen_loop(
                         # All routes now use /hooks/wake to inject into main session
                         url = cfg.wake_webhook_url
                         logger.info(
-                            "Forwarding: route=%s sender=%s wake_url=%s",
-                            route, _truncate_did(params.get("sender_did", "")), url,
+                            "[#%d] Forwarding: route=%s sender=%s",
+                            msg_seq, route, _truncate_did(params.get("sender_did", "")),
                         )
-                        await _forward(http, url, cfg.webhook_token, params, route, cfg)
+                        await _forward(http, url, cfg.webhook_token, params, route, cfg, ext_channels, msg_seq)
 
             except asyncio.CancelledError:
                 if e2ee_handler is not None:
