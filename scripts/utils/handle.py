@@ -472,7 +472,25 @@ async def register_handle_with_telegram(
     if is_public:
         payload["is_public"] = True
 
-    reg_result = await rpc_call(client, DID_AUTH_RPC, "register", payload)
+    try:
+        reg_result = await rpc_call(client, DID_AUTH_RPC, "register", payload)
+    except JsonRpcError as e:
+        # Enhanced error logging for Telegram registration
+        import sys
+        print(f"\n=== Telegram Registration Failed ===", file=sys.stderr)
+        print(f"Error Code: {e.code}", file=sys.stderr)
+        print(f"Error Message: {e.message}", file=sys.stderr)
+        if e.data:
+            print(f"Error Data: {e.data}", file=sys.stderr)
+        print(f"\nRequest Payload:", file=sys.stderr)
+        print(f"  - handle: {handle}", file=sys.stderr)
+        print(f"  - telegram_user_id: {telegram_user_id}", file=sys.stderr)
+        print(f"  - telegram_ticket: {telegram_ticket}", file=sys.stderr)
+        print(f"  - telegram_bot_token: {'<provided>' if telegram_bot_token else '<not provided>'}", file=sys.stderr)
+        print(f"  - invite_code: {invite_code if invite_code else '<not provided>'}", file=sys.stderr)
+        print(f"===================================\n", file=sys.stderr)
+        raise
+
     identity.user_id = reg_result["user_id"]
 
     # 3. Registration returns access_token for handle mode
