@@ -2,7 +2,8 @@
 
 [INPUT]: ws_listener helpers with monkeypatched auth, RPC, routing, and storage
 [OUTPUT]: Coverage for secondary-credential daemon sends, paginated catch-up,
-          and normalized offline message persistence
+          normalized offline message persistence, and read-mark gating on
+          forwarding success
 [POS]: WebSocket listener unit tests for daemon proxying and reconnect recovery
 
 [PROTOCOL]:
@@ -15,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -231,7 +233,10 @@ def test_catch_up_inbox_paginates_before_advancing_cursor(
         ws_listener._catch_up_inbox(
             credential_name="default",
             my_did="did:alice",
-            cfg=object(),
+            cfg=SimpleNamespace(
+                wake_webhook_url="http://127.0.0.1/hooks/wake",
+                webhook_token="token",
+            ),
             config=config,
             ws=fake_ws,
             http=object(),
@@ -327,7 +332,10 @@ def test_catch_up_inbox_persists_normalized_e2ee_messages(
         ws_listener._catch_up_inbox(
             credential_name="default",
             my_did="did:alice",
-            cfg=object(),
+            cfg=SimpleNamespace(
+                wake_webhook_url="http://127.0.0.1/hooks/wake",
+                webhook_token="token",
+            ),
             config=config,
             ws=fake_ws,
             http=object(),
@@ -346,3 +354,229 @@ def test_catch_up_inbox_persists_normalized_e2ee_messages(
             "created_at": "2026-03-20T10:01:00+00:00",
         }
     ]]
+
+
+def test_catch_up_inbox_keeps_message_unread_when_forward_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Catch-up should not mark rendered messages as read after inject failure."""
+    config = _build_config(tmp_path)
+    fake_ws = _FakeWsClient(
+        responses=[
+            {
+                "messages": [
+                    {
+                        "id": "msg-forward-fail",
+                        "type": "text",
+                        "sender_did": "did:bob",
+                        "content": "hello",
+                        "created_at": "2026-03-20T10:01:00+00:00",
+                    }
+                ],
+                "has_more": False,
+            }
+        ]
+    )
+    marked_locally: list[str] = []
+
+    monkeypatch.setattr(ws_listener, "_load_inbox_sync_since", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ws_listener, "_save_inbox_sync_since", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ws_listener.local_store, "get_message_by_id", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        ws_listener,
+        "create_authenticator",
+        lambda credential_name, config: (object(), {"did": "did:alice"}),
+    )
+
+    async def _fake_auto_process(
+        messages: list[dict[str, Any]],
+        *,
+        local_did: str,
+        auth: Any,
+        credential_name: str,
+    ) -> tuple[list[dict[str, Any]], list[str], object]:
+        del local_did, auth, credential_name
+        return messages, [], object()
+
+    async def _fake_forward(*args, **kwargs) -> bool:
+        del args, kwargs
+        return False
+
+    monkeypatch.setattr(ws_listener, "_auto_process_e2ee_messages", _fake_auto_process)
+    monkeypatch.setattr(ws_listener, "_store_inbox_messages", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        ws_listener,
+        "_mark_local_messages_read",
+        lambda *, credential_name, owner_did, message_ids: marked_locally.extend(message_ids),
+    )
+    monkeypatch.setattr(ws_listener, "classify_message", lambda params, my_did, cfg: "wake")
+    monkeypatch.setattr(ws_listener, "_forward", _fake_forward)
+
+    asyncio.run(
+        ws_listener._catch_up_inbox(
+            credential_name="default",
+            my_did="did:alice",
+            cfg=SimpleNamespace(
+                wake_webhook_url="http://127.0.0.1/hooks/wake",
+                webhook_token="token",
+            ),
+            config=config,
+            ws=fake_ws,
+            http=object(),
+            local_db=object(),
+            channels=[],
+        )
+    )
+
+    mark_read_calls = [params for method, params in fake_ws.calls if method == "mark_read"]
+    assert mark_read_calls == []
+    assert marked_locally == []
+
+
+def test_listen_loop_keeps_message_unread_when_forward_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Live WebSocket delivery should keep the inbox item unread after inject failure."""
+    config = _build_config(tmp_path)
+    mark_read_calls: list[tuple[str, str | None, str]] = []
+    stored_messages: list[str] = []
+
+    class _FakeE2eeHandler:
+        """Minimal E2EE handler stub for plaintext message tests."""
+
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+            self.is_ready = False
+
+        async def initialize(self, my_did: str) -> bool:
+            del my_did
+            return False
+
+        async def force_save_state(self) -> None:
+            return None
+
+    class _FakeDb:
+        """Minimal local DB stub."""
+
+        def close(self) -> None:
+            return None
+
+    class _FakeRuntimeWsClient:
+        """WsClient stub that yields one notification and then stops the loop."""
+
+        def __init__(self, config: SDKConfig, identity: Any) -> None:
+            del config, identity
+            self._notifications = [
+                {
+                    "method": "new_message",
+                    "params": {
+                        "id": "msg-live-fail",
+                        "type": "text",
+                        "sender_did": "did:bob",
+                        "content": "hello live",
+                    },
+                }
+            ]
+
+        async def __aenter__(self) -> "_FakeRuntimeWsClient":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            del exc_type, exc, tb
+            return None
+
+        async def receive_notification(self, timeout: float = 5.0) -> dict[str, Any] | None:
+            del timeout
+            if self._notifications:
+                return self._notifications.pop(0)
+            raise asyncio.CancelledError()
+
+        async def ping(self) -> bool:
+            return True
+
+        async def send_pong(self) -> None:
+            return None
+
+    async def _fake_forward(*args, **kwargs) -> bool:
+        del args, kwargs
+        return False
+
+    async def _fake_mark_message_read(
+        ws: Any,
+        my_did: str,
+        message_id: str | None,
+        *,
+        credential_name: str,
+    ) -> None:
+        del ws
+        mark_read_calls.append((my_did, message_id, credential_name))
+
+    async def _fake_refresh_channels(*args, **kwargs) -> tuple[list[tuple[str, str]], str, float | None]:
+        del args, kwargs
+        return [], "empty", None
+
+    async def _fake_catch_up(*args, **kwargs) -> None:
+        del args, kwargs
+
+    monkeypatch.setattr(ws_listener, "E2eeHandler", _FakeE2eeHandler)
+    monkeypatch.setattr(
+        ws_listener,
+        "load_identity",
+        lambda credential_name: {
+            "did": "did:alice",
+            "jwt_token": "jwt-token",
+            "private_key_pem": b"private",
+            "public_key_pem": b"public",
+        },
+    )
+    monkeypatch.setattr(
+        ws_listener,
+        "_build_identity",
+        lambda cred_data: SimpleNamespace(did=cred_data["did"], jwt_token=cred_data["jwt_token"]),
+    )
+    monkeypatch.setattr(ws_listener, "WsClient", _FakeRuntimeWsClient)
+    monkeypatch.setattr(ws_listener, "_refresh_external_channels", _fake_refresh_channels)
+    monkeypatch.setattr(ws_listener, "_catch_up_inbox", _fake_catch_up)
+    monkeypatch.setattr(ws_listener, "_forward", _fake_forward)
+    monkeypatch.setattr(ws_listener, "_mark_message_read", _fake_mark_message_read)
+    monkeypatch.setattr(ws_listener, "classify_message", lambda params, my_did, cfg: "wake")
+    monkeypatch.setattr(ws_listener, "is_websocket_mode", lambda config: True)
+    monkeypatch.setattr(ws_listener.local_store, "get_connection", lambda: _FakeDb())
+    monkeypatch.setattr(ws_listener.local_store, "ensure_schema", lambda conn: None)
+    monkeypatch.setattr(
+        ws_listener.local_store,
+        "store_message",
+        lambda conn, **kwargs: stored_messages.append(kwargs["msg_id"]),
+    )
+    monkeypatch.setattr(ws_listener.local_store, "upsert_contact", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ws_listener.local_store, "upsert_group", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        ws_listener.local_store,
+        "sync_group_member_from_system_event",
+        lambda *args, **kwargs: None,
+    )
+
+    cfg = SimpleNamespace(
+        reconnect_base_delay=1.0,
+        reconnect_max_delay=5.0,
+        e2ee_save_interval=30.0,
+        e2ee_decrypt_fail_action="drop",
+        mode="smart",
+        heartbeat_interval=60.0,
+        wake_webhook_url="http://127.0.0.1/hooks/wake",
+        webhook_token="token",
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            ws_listener.listen_loop(
+                credential_name="default",
+                cfg=cfg,
+                config=config,
+            )
+        )
+
+    assert stored_messages == ["msg-live-fail"]
+    assert mark_read_calls == []

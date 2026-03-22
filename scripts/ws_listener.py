@@ -7,7 +7,8 @@
 [OUTPUT]: WebSocket -> OpenClaw TUI bridge (chat.inject RPC for instant display,
           HTTP webhook fallback) + localhost message daemon for CLI message RPC
           proxying + cross-platform service lifecycle management + local SQLite
-          message/group persistence
+          message/group persistence + conditional read acknowledgements only
+          after successful user-visible forwarding
 [POS]: Standalone background process with cross-platform service management (launchd / systemd / Task Scheduler), reuses utils/ core tool layer
 
 [PROTOCOL]:
@@ -468,6 +469,15 @@ def _parse_inbox_timestamp(value: Any) -> datetime | None:
     return None
 
 
+def _extract_message_id(message: dict[str, Any]) -> str | None:
+    """Return one stable message ID from a message payload."""
+    for key in ("id", "msg_id"):
+        value = message.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 async def _catch_up_inbox(
     credential_name: str,
     my_did: str,
@@ -566,10 +576,30 @@ async def _catch_up_inbox(
     if rendered_messages:
         _store_inbox_messages(credential_name, my_did, rendered_messages)
 
+    rendered_message_ids = {
+        message_id
+        for msg in rendered_messages
+        if (message_id := _extract_message_id(msg)) is not None
+    }
+    read_ids: list[str] = []
+    seen_read_ids: set[str] = set()
+
+    def _append_read_id(message_id: str | None) -> None:
+        if not message_id or message_id in seen_read_ids:
+            return
+        seen_read_ids.add(message_id)
+        read_ids.append(message_id)
+
+    for processed_id in processed_ids:
+        if processed_id not in rendered_message_ids:
+            _append_read_id(processed_id)
+
     msg_seq = 0
     for msg in rendered_messages:
+        message_id = _extract_message_id(msg)
         route = classify_message(msg, my_did, cfg)
         if route is None:
+            _append_read_id(message_id)
             continue
         msg_seq += 1
         logger.info(
@@ -578,16 +608,26 @@ async def _catch_up_inbox(
             route,
             _truncate_did(msg.get("sender_did", "")),
         )
-        await _forward(http, cfg.wake_webhook_url, cfg.webhook_token, msg, route, cfg, channels, msg_seq)
+        inject_ok = await _forward(
+            http,
+            cfg.wake_webhook_url,
+            cfg.webhook_token,
+            msg,
+            route,
+            cfg,
+            channels,
+            msg_seq,
+        )
+        if inject_ok:
+            _append_read_id(message_id)
+        else:
+            logger.warning(
+                "[catch-up #%d] Forward failed; keep unread: sender=%s type=%s",
+                msg_seq,
+                _truncate_did(msg.get("sender_did", "")),
+                msg.get("type", ""),
+            )
 
-    read_ids = [
-        str(msg_id)
-        for msg_id in {
-            *(msg.get("id") or msg.get("msg_id") for msg in to_process),
-            *processed_ids,
-        }
-        if isinstance(msg_id, str) and msg_id
-    ]
     if read_ids:
         try:
             await ws.send_rpc("mark_read", {"user_did": my_did, "message_ids": read_ids})
@@ -1212,13 +1252,30 @@ async def listen_loop(
                             else:
                                 logger.info("External channels empty (on-demand refresh)")
                             last_channel_refresh = time.monotonic()
-                        await _forward(http, url, cfg.webhook_token, params, route, cfg, ext_channels, msg_seq)
-                        await _mark_message_read(
-                            ws,
-                            my_did,
-                            incoming_msg_id,
-                            credential_name=credential_name,
+                        inject_ok = await _forward(
+                            http,
+                            url,
+                            cfg.webhook_token,
+                            params,
+                            route,
+                            cfg,
+                            ext_channels,
+                            msg_seq,
                         )
+                        if inject_ok:
+                            await _mark_message_read(
+                                ws,
+                                my_did,
+                                incoming_msg_id,
+                                credential_name=credential_name,
+                            )
+                        else:
+                            logger.warning(
+                                "[#%d] Forward failed; keep unread: sender=%s type=%s",
+                                msg_seq,
+                                _truncate_did(params.get("sender_did", "")),
+                                params.get("type", ""),
+                            )
 
             except asyncio.CancelledError:
                 if e2ee_handler is not None:
