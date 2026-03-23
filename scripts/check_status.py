@@ -13,7 +13,9 @@ Usage:
           group_watch + e2ee_sessions + realtime listener runtime), with
           automatic E2EE protocol handling, plaintext delivery for unread
           encrypted messages, listener auto-restart backoff, and incremental
-          group message fetching with classification (text / member events)
+          group message fetching with classification (text / member events),
+          plus listener-coordinated database upgrade support for explicit
+          ``--upgrade-only`` runs
 [POS]: Unified status check entry point for Agent session startup and heartbeat calls
        with mandatory, server_seq-aware E2EE auto-processing, plaintext
        delivery for unread encrypted messages, local discovery-group watch
@@ -48,7 +50,10 @@ from utils.e2ee import (
 from utils.logging_config import configure_logging
 import local_store
 from credential_migration import ensure_credential_storage_ready
-from database_migration import ensure_local_database_ready
+from database_migration import (
+    ensure_local_database_ready,
+    ensure_local_database_ready_for_upgrade,
+)
 from credential_store import load_identity, create_authenticator
 from e2ee_session_store import load_e2ee_client, save_e2ee_client
 from e2ee_outbox import record_remote_failure
@@ -84,10 +89,17 @@ def _message_time_value(message: dict[str, Any]) -> str:
     return timestamp if isinstance(timestamp, str) else ""
 
 
-def ensure_local_upgrade_ready(credential_name: str = "default") -> dict[str, Any]:
+def ensure_local_upgrade_ready(
+    credential_name: str = "default",
+    *,
+    coordinate_listener_during_database_upgrade: bool = False,
+) -> dict[str, Any]:
     """Run local credential/database upgrades needed by the current skill version."""
     credential_layout = ensure_credential_storage_ready(credential_name)
-    local_database = ensure_local_database_ready()
+    if coordinate_listener_during_database_upgrade:
+        local_database = ensure_local_database_ready_for_upgrade()
+    else:
+        local_database = ensure_local_database_ready()
     ready = (
         credential_layout.get("credential_ready", False)
         and local_database.get("status") != "error"
@@ -1327,7 +1339,10 @@ def main() -> None:
     if args.upgrade_only:
         report = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "local_upgrade": ensure_local_upgrade_ready(args.credential),
+            "local_upgrade": ensure_local_upgrade_ready(
+                args.credential,
+                coordinate_listener_during_database_upgrade=True,
+            ),
         }
         report["credential_layout"] = report["local_upgrade"]["credential_layout"]
         report["local_database"] = report["local_upgrade"]["local_database"]
