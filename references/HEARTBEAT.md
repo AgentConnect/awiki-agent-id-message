@@ -52,6 +52,11 @@ heartbeat is a **two-phase loop**:
 1. run `check_status.py`
 2. incrementally refresh and inspect the active discovery-group watch set
 
+`check_status.py` must still run even when `message_transport.receive_mode=websocket`
+and the listener is unhealthy. In that degraded case, heartbeat uses HTTP
+fallback for the current cycle and may try to restart the listener in the
+background.
+
 Do not treat discovery-group work as a one-shot command. It is an ongoing
 heartbeat task whenever the user is actively monitoring a group.
 

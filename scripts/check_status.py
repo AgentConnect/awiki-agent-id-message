@@ -7,10 +7,11 @@ Usage:
 
 [INPUT]: SDK (RPC calls, E2eeClient), credential_store (authenticator factory),
          e2ee_store, credential_migration, database_migration, local_store,
-         logging_config, local daemon availability probing
+         listener recovery helpers, logging_config
 [OUTPUT]: Structured JSON status report (local upgrade + identity + inbox +
-          group_watch + e2ee_sessions), with automatic E2EE protocol handling,
-          plaintext delivery for unread encrypted messages, and incremental
+          group_watch + e2ee_sessions + realtime listener runtime), with
+          automatic E2EE protocol handling, plaintext delivery for unread
+          encrypted messages, listener auto-restart backoff, and incremental
           group message fetching with classification (text / member events)
 [POS]: Unified status check entry point for Agent session startup and heartbeat calls
        with mandatory, server_seq-aware E2EE auto-processing, plaintext
@@ -50,7 +51,7 @@ from database_migration import ensure_local_database_ready
 from credential_store import load_identity, create_authenticator
 from e2ee_store import load_e2ee_state, save_e2ee_state
 from e2ee_outbox import record_remote_failure
-from message_daemon import is_local_daemon_available
+from listener_recovery import ensure_listener_runtime, get_listener_runtime_report
 from message_transport import is_websocket_mode
 
 
@@ -213,6 +214,114 @@ def _build_visible_inbox_report(
     }
 
 
+def _message_id_value(message: dict[str, Any]) -> str | None:
+    """Return one stable message identifier when available."""
+    for key in ("id", "msg_id"):
+        value = message.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _message_dedup_key(message: dict[str, Any]) -> tuple[Any, ...]:
+    """Build a stable deduplication key for merged local/remote inbox results."""
+    message_id = _message_id_value(message)
+    if message_id:
+        return ("id", message_id)
+    return (
+        "fallback",
+        message.get("sender_did"),
+        message.get("receiver_did"),
+        message.get("group_id"),
+        message.get("type"),
+        message.get("content"),
+        _message_time_value(message),
+    )
+
+
+def _message_display_sort_key(message: dict[str, Any]) -> tuple[Any, ...]:
+    """Build a descending-friendly display key for merged visible inbox messages."""
+    server_seq = message.get("server_seq")
+    has_server_seq = 1 if isinstance(server_seq, int) else 0
+    server_seq_value = server_seq if isinstance(server_seq, int) else -1
+    return (
+        has_server_seq,
+        server_seq_value,
+        _message_time_value(message),
+        str(message.get("id") or message.get("msg_id") or ""),
+    )
+
+
+def _merge_visible_inbox_messages(
+    local_messages: list[dict[str, Any]],
+    remote_messages: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Merge visible local-cache and HTTP inbox messages with deduplication."""
+    merged_by_key: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for message in remote_messages:
+        merged_by_key[_message_dedup_key(message)] = dict(message)
+    for message in local_messages:
+        merged_by_key[_message_dedup_key(message)] = dict(message)
+    merged = list(merged_by_key.values())
+    merged.sort(key=_message_display_sort_key, reverse=True)
+    return merged[:limit]
+
+
+def _load_local_visible_inbox_messages(owner_did: str | None) -> list[dict[str, Any]]:
+    """Load visible unread inbox messages from local SQLite cache."""
+    if not owner_did:
+        return []
+    conn = local_store.get_connection()
+    try:
+        local_store.ensure_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT
+                m.msg_id AS id,
+                m.sender_did,
+                m.sender_name,
+                m.receiver_did,
+                m.group_id,
+                m.group_did,
+                g.name AS group_name,
+                m.content_type AS type,
+                m.content,
+                m.server_seq,
+                m.sent_at,
+                m.stored_at AS created_at,
+                m.is_e2ee
+            FROM messages m
+            LEFT JOIN groups g
+              ON g.owner_did = m.owner_did
+             AND g.group_id = m.group_id
+            WHERE m.owner_did = ?
+              AND m.direction = 0
+              AND m.is_read = 0
+            ORDER BY COALESCE(m.server_seq, -1) DESC,
+                     COALESCE(m.sent_at, m.stored_at) DESC,
+                     m.stored_at DESC
+            LIMIT ?
+            """,
+            (owner_did, _INBOX_FETCH_LIMIT),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    visible_messages: list[dict[str, Any]] = []
+    for row in rows:
+        message = dict(row)
+        msg_type = str(message.get("type") or "")
+        if not _is_user_visible_message_type(msg_type):
+            continue
+        if int(message.get("is_e2ee") or 0):
+            message["is_e2ee"] = True
+            message["e2ee_notice"] = _E2EE_USER_NOTICE
+        visible_messages.append(message)
+    return visible_messages
+
+
 def _build_local_inbox_report(owner_did: str | None) -> dict[str, Any]:
     """Build one inbox report from local SQLite cache only."""
     if not owner_did:
@@ -225,41 +334,7 @@ def _build_local_inbox_report(owner_did: str | None) -> dict[str, Any]:
             "messages": [],
         }
     try:
-        conn = local_store.get_connection()
-        try:
-            local_store.ensure_schema(conn)
-            rows = conn.execute(
-                """
-                SELECT
-                    m.msg_id AS id,
-                    m.sender_did,
-                    m.sender_name,
-                    m.receiver_did,
-                    m.group_id,
-                    m.group_did,
-                    g.name AS group_name,
-                    m.content_type AS type,
-                    m.content,
-                    m.server_seq,
-                    m.sent_at,
-                    m.stored_at AS created_at,
-                    m.is_e2ee
-                FROM messages m
-                LEFT JOIN groups g
-                  ON g.owner_did = m.owner_did
-                 AND g.group_id = m.group_id
-                WHERE m.owner_did = ?
-                  AND m.direction = 0
-                  AND m.is_read = 0
-                ORDER BY COALESCE(m.server_seq, -1) DESC,
-                         COALESCE(m.sent_at, m.stored_at) DESC,
-                         m.stored_at DESC
-                LIMIT ?
-                """,
-                (owner_did, _INBOX_FETCH_LIMIT),
-            ).fetchall()
-        finally:
-            conn.close()
+        visible_messages = _load_local_visible_inbox_messages(owner_did)
     except Exception as exc:  # noqa: BLE001
         return {
             "status": "error",
@@ -270,20 +345,53 @@ def _build_local_inbox_report(owner_did: str | None) -> dict[str, Any]:
             "text_by_sender": {},
             "messages": [],
         }
-
-    visible_messages: list[dict[str, Any]] = []
-    for row in rows:
-        message = dict(row)
-        msg_type = str(message.get("type") or "")
-        if not _is_user_visible_message_type(msg_type):
-            continue
-        if int(message.get("is_e2ee") or 0):
-            message["is_e2ee"] = True
-            message["e2ee_notice"] = _E2EE_USER_NOTICE
-        visible_messages.append(message)
     report = _build_visible_inbox_report(visible_messages)
     report["source"] = "local_ws_cache"
     return report
+
+
+async def _sync_remote_visible_inbox_messages(
+    *,
+    credential_name: str,
+    auth: Any,
+    owner_did: str,
+    config: SDKConfig,
+) -> dict[str, Any]:
+    """Best-effort HTTP inbox sync used while websocket local cache is active."""
+    result: dict[str, Any] = {
+        "attempted": True,
+        "status": "ok",
+        "messages": [],
+        "total": 0,
+    }
+    try:
+        async with create_molt_message_client(config) as client:
+            inbox = await authenticated_rpc_call(
+                client,
+                MESSAGE_RPC,
+                "get_inbox",
+                params={"user_did": owner_did, "limit": _INBOX_FETCH_LIMIT},
+                auth=auth,
+                credential_name=credential_name,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "HTTP inbox sync failed during status check credential=%s error=%s",
+            credential_name,
+            exc,
+        )
+        result["status"] = "error"
+        result["error"] = str(exc)
+        return result
+
+    visible_messages = [
+        _strip_hidden_user_fields(message)
+        for message in inbox.get("messages", [])
+        if _is_user_visible_message_type(str(message.get("type") or ""))
+    ]
+    result["messages"] = visible_messages
+    result["total"] = len(visible_messages)
+    return result
 
 
 def summarize_group_watch(owner_did: str | None) -> dict[str, Any]:
@@ -859,6 +967,8 @@ async def summarize_inbox(
 
 async def _build_inbox_report_with_auto_e2ee(
     credential_name: str = "default",
+    *,
+    listener_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fetch inbox, auto-handle E2EE, and return the surfaced messages.
 
@@ -878,28 +988,40 @@ async def _build_inbox_report_with_auto_e2ee(
             "messages": [],
         }
 
-    # Check if ws_listener is running — if so, skip E2EE processing
-    listener_running = False
-    try:
-        from service_manager import get_service_manager
-        listener_running = get_service_manager().status().get("running", False)
-    except Exception:
-        logger.debug("Failed to query listener service manager status", exc_info=True)
-    if not listener_running:
-        listener_running = is_local_daemon_available(config=config)
+    websocket_mode = is_websocket_mode(config)
+    listener_owned_inbox = False
+    if websocket_mode:
+        resolved_listener_status = listener_status or ensure_listener_runtime(
+            credential_name,
+            config=config,
+        )
+        listener_owned_inbox = bool(resolved_listener_status.get("was_running", False))
 
     auth, data = auth_result
-    if is_websocket_mode(config):
-        if not listener_running:
-            return {
-                "status": "listener_unavailable",
-                "total": 0,
-                "by_type": {},
-                "text_messages": 0,
-                "text_by_sender": {},
-                "messages": [],
-            }
-        return _build_local_inbox_report(data["did"])
+    if websocket_mode and listener_owned_inbox:
+        report = _build_local_inbox_report(data["did"])
+        local_messages = list(report.get("messages", []))
+        remote_sync = await _sync_remote_visible_inbox_messages(
+            credential_name=credential_name,
+            auth=auth,
+            owner_did=str(data["did"]),
+            config=config,
+        )
+        merged_messages = _merge_visible_inbox_messages(
+            local_messages,
+            remote_sync.get("messages", []),
+            limit=_INBOX_FETCH_LIMIT,
+        )
+        report = _build_visible_inbox_report(merged_messages)
+        report["source"] = "local_ws_cache"
+        report["http_sync"] = {
+            "attempted": True,
+            "status": remote_sync.get("status", "error"),
+            "total": remote_sync.get("total", 0),
+        }
+        if isinstance(remote_sync.get("error"), str):
+            report["http_sync"]["error"] = remote_sync["error"]
+        return report
     try:
         async with create_molt_message_client(config) as client:
             inbox = await authenticated_rpc_call(
@@ -918,7 +1040,7 @@ async def _build_inbox_report_with_auto_e2ee(
             processed_id_set: set[str] = set()
             rendered_decrypted_messages: list[dict[str, Any]] = []
 
-            if listener_running:
+            if listener_owned_inbox:
                 # ws_listener owns E2EE state — skip processing to avoid
                 # state conflicts (race condition on session seq numbers).
                 logger.info(
@@ -1047,7 +1169,7 @@ async def _build_inbox_report_with_auto_e2ee(
                     credential_name=credential_name,
                 )
 
-            if not listener_running:
+            if not listener_owned_inbox:
                 _save_e2ee_client(e2ee_client, credential_name)
 
         remaining_messages = [
@@ -1060,7 +1182,11 @@ async def _build_inbox_report_with_auto_e2ee(
             for message in remaining_messages
             if _is_user_visible_message_type(str(message.get("type") or ""))
         ]
-        return _build_visible_inbox_report(visible_messages)
+        report = _build_visible_inbox_report(visible_messages)
+        report["source"] = (
+            "remote_http_fallback" if websocket_mode else "remote_http"
+        )
+        return report
     except Exception as exc:  # noqa: BLE001
         return {
             "status": "error",
@@ -1136,8 +1262,24 @@ async def check_status(
             credential_name=credential_name,
         )
 
+    config = SDKConfig()
+    websocket_mode = is_websocket_mode(config)
+    if websocket_mode:
+        listener_runtime = ensure_listener_runtime(
+            credential_name,
+            config=config,
+        )
+    else:
+        listener_runtime = get_listener_runtime_report(
+            credential_name,
+            config=config,
+        )
+
     # 3. Inbox summary / delivery
-    report["inbox"] = await _build_inbox_report_with_auto_e2ee(credential_name)
+    report["inbox"] = await _build_inbox_report_with_auto_e2ee(
+        credential_name,
+        listener_status=listener_runtime,
+    )
 
     # 4. E2EE session status
     e2ee_state = load_e2ee_state(credential_name)
@@ -1149,25 +1291,28 @@ async def check_status(
         report["e2ee_sessions"] = {"active": 0}
 
     # 5. Real-time listener status
-    try:
-        from service_manager import get_service_manager
-        mgr_status = get_service_manager().status()
-        listener_report: dict[str, Any] = {
-            "installed": mgr_status.get("installed", False),
-            "running": mgr_status.get("running", False),
-        }
-        if not mgr_status.get("installed", False):
-            listener_report["hint"] = (
-                "Run: python scripts/setup_realtime.py --credential "
-                + credential_name
-            )
-        report["realtime_listener"] = listener_report
-    except Exception:
-        report["realtime_listener"] = {
-            "installed": False,
-            "running": False,
-            "hint": "Run: python scripts/setup_realtime.py",
-        }
+    report["realtime_listener"] = {
+        "mode": "websocket" if websocket_mode else "http",
+        "installed": listener_runtime.get("installed", False),
+        "running": listener_runtime.get("running", False),
+        "service_running": listener_runtime.get("service_running", False),
+        "daemon_available": listener_runtime.get("daemon_available", False),
+        "degraded": listener_runtime.get("degraded", False),
+        "auto_restart_paused": listener_runtime.get("auto_restart_paused", False),
+        "consecutive_restart_failures": listener_runtime.get(
+            "consecutive_restart_failures",
+            0,
+        ),
+        "last_restart_attempt_at": listener_runtime.get("last_restart_attempt_at"),
+        "last_restart_result": listener_runtime.get("last_restart_result"),
+    }
+    last_error = listener_runtime.get("last_error")
+    if isinstance(last_error, str) and last_error:
+        report["realtime_listener"]["last_error"] = last_error
+    if not listener_runtime.get("installed", False):
+        report["realtime_listener"]["hint"] = (
+            "Run: python scripts/setup_realtime.py --credential " + credential_name
+        )
 
     return report
 

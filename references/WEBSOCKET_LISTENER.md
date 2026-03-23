@@ -1,6 +1,6 @@
 # WebSocket Listener — Real-time Message Delivery
 
-Messages can be delivered via two transport channels: **HTTP RPC** (request/response polling) and **WebSocket** (real-time push). Both support plaintext and E2EE encrypted messages, but the client now runs in **one explicit transport mode at a time**.
+Messages can be delivered via two transport channels: **HTTP RPC** (request/response polling) and **WebSocket** (real-time push). Both support plaintext and E2EE encrypted messages, and the client still exposes **one explicit receive mode at a time** — but `websocket` mode now includes an automatic HTTP safety net whenever the listener or remote WSS transport is temporarily unavailable.
 
 The WebSocket Listener provides instant message delivery (<1s latency) and transparent E2EE handling (protocol messages auto-processed, encrypted messages decrypted before forwarding). However, **it currently does not support Feishu (Lark) channel** — if you use Feishu as your messaging frontend, use HTTP heartbeat polling instead.
 
@@ -11,7 +11,7 @@ The WebSocket Listener provides instant message delivery (<1s latency) and trans
 | **`websocket`** | A single long-lived `/message/ws` connection | `ws_listener.py` | Real-time collaboration and transparent E2EE |
 | **`http`** | Direct HTTP JSON-RPC calls | HTTP CLI scripts | Simpler request/response workflows and environments without the background listener |
 
-In `websocket` mode, the listener owns the **only remote WebSocket connection**. Other message CLIs talk to a localhost daemon exposed by the listener instead of opening their own remote WebSocket connections. In `http` mode, the listener is disabled and message CLIs use HTTP JSON-RPC directly.
+In `websocket` mode, the listener owns the **only remote WebSocket connection**. Other message CLIs talk to a localhost daemon exposed by the listener instead of opening their own remote WebSocket connections. If that daemon or remote WSS link is unavailable, message reads and message RPC sends automatically fall back to HTTP for the current request, while the client attempts to restart the listener in the background (up to three consecutive failures). While the listener is healthy, it also polls the credential index and automatically starts WSS sessions for identities created after the listener process has already started. In `http` mode, the listener is disabled and message CLIs use HTTP JSON-RPC directly.
 
 ## Choose Your Approach
 
@@ -239,6 +239,7 @@ Auth header: `Authorization: Bearer <webhook_token>` (must match OpenClaw `hooks
 When using the WebSocket Listener alongside the heartbeat protocol:
 
 - The listener handles E2EE transparently: protocol messages (init/rekey/error) are processed internally, encrypted messages are decrypted and forwarded as plaintext to webhooks
-- In `websocket` mode, `check_status.py` and `check_inbox.py` read the listener-managed local cache instead of consuming the remote inbox directly
+- In `websocket` mode, `check_status.py` and `check_inbox.py` prefer the listener-managed local cache, but automatically fall back to remote HTTP inbox reads when the listener is degraded
+- In `websocket` mode, message RPC sends such as `send` and `mark_read` also fall back to HTTP when the local daemon or remote WSS transport is unavailable
 - In `http` mode, `e2ee_messaging.py --process --peer <DID>` remains a valid manual recovery path
 - The listener complements the heartbeat — it does not replace `check_status.py`

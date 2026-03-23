@@ -2,7 +2,8 @@
 
 [INPUT]: message_transport module, message_daemon, WsClient, fake websocket connection
 [OUTPUT]: Regression coverage for receive-mode persistence, localhost daemon
-          proxying, and single-reader response/notification demultiplexing
+          proxying, automatic HTTP fallback on WebSocket transport failures,
+          and single-reader response/notification demultiplexing
 [POS]: Transport selection and WebSocket client safety tests
 
 [PROTOCOL]:
@@ -52,6 +53,16 @@ class FakeConnection:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class _DummyAsyncClient:
+    """Minimal async context manager used by mocked HTTP fallback tests."""
+
+    async def __aenter__(self) -> "_DummyAsyncClient":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        del exc_type, exc, tb
 
 
 def _build_config(tmp_path: Path) -> SDKConfig:
@@ -234,5 +245,145 @@ def test_local_daemon_timeout_is_wrapped_as_runtime_error(tmp_path: Path) -> Non
                 )
         finally:
             await daemon.close()
+
+    asyncio.run(_run())
+
+
+def test_message_rpc_call_falls_back_to_http_on_websocket_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Transport-layer WebSocket errors should transparently retry over HTTP."""
+
+    async def _run() -> None:
+        config = _build_config(tmp_path)
+        http_calls: list[tuple[str, dict[str, object]]] = []
+        recovery_calls: list[str] = []
+        healthy_calls: list[str] = []
+
+        message_transport.write_receive_mode(
+            message_transport.RECEIVE_MODE_WEBSOCKET,
+            config=config,
+        )
+        monkeypatch.setattr(
+            message_transport,
+            "websocket_message_rpc_call",
+            lambda method, params, *, credential_name, config: (_raise_transport_error()),
+        )
+        monkeypatch.setattr(
+            message_transport,
+            "create_authenticator",
+            lambda credential_name, config: (object(), {"did": "did:alice"}),
+        )
+        monkeypatch.setattr(
+            message_transport,
+            "create_molt_message_client",
+            lambda config: _DummyAsyncClient(),
+        )
+
+        async def _fake_authenticated_rpc_call(
+            client,
+            endpoint: str,
+            method: str,
+            params: dict[str, object] | None = None,
+            *,
+            auth: object,
+            credential_name: str,
+        ) -> dict[str, object]:
+            del client, endpoint, auth, credential_name
+            http_calls.append((method, params or {}))
+            return {"id": "http-msg-1", "server_seq": 10}
+
+        monkeypatch.setattr(
+            message_transport,
+            "authenticated_rpc_call",
+            _fake_authenticated_rpc_call,
+        )
+        monkeypatch.setattr(
+            message_transport,
+            "ensure_listener_runtime",
+            lambda credential_name, *, config=None: recovery_calls.append(
+                credential_name
+            ) or {"running": False},
+        )
+        monkeypatch.setattr(
+            message_transport,
+            "note_listener_healthy",
+            lambda credential_name, *, config=None: healthy_calls.append(credential_name),
+        )
+
+        result = await message_transport.message_rpc_call(
+            "send",
+            {"content": "hello"},
+            credential_name="alice",
+            config=config,
+        )
+
+        assert result == {"id": "http-msg-1", "server_seq": 10}
+        assert http_calls == [("send", {"content": "hello"})]
+        assert recovery_calls == ["alice"]
+        assert healthy_calls == []
+
+    async def _raise_transport_error() -> dict[str, object]:
+        raise RuntimeError("Local message daemon is unavailable; make sure `ws_listener` is running in websocket mode")
+
+    asyncio.run(_run())
+
+
+def test_message_rpc_call_does_not_fallback_on_json_rpc_business_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Business-layer JSON-RPC errors should propagate without HTTP retry."""
+
+    async def _run() -> None:
+        config = _build_config(tmp_path)
+        http_called = False
+
+        message_transport.write_receive_mode(
+            message_transport.RECEIVE_MODE_WEBSOCKET,
+            config=config,
+        )
+
+        async def _raise_business_error(
+            method: str,
+            params: dict[str, object] | None = None,
+            *,
+            credential_name: str,
+            config: SDKConfig | None = None,
+        ) -> dict[str, object]:
+            del method, params, credential_name, config
+            raise RuntimeError("JSON-RPC error -32602: Invalid params")
+
+        monkeypatch.setattr(
+            message_transport,
+            "websocket_message_rpc_call",
+            _raise_business_error,
+        )
+        monkeypatch.setattr(
+            message_transport,
+            "http_message_rpc_call",
+            lambda method, params, *, credential_name, config: _mark_http_called(),
+        )
+        monkeypatch.setattr(
+            message_transport,
+            "ensure_listener_runtime",
+            lambda credential_name, *, config=None: {"running": False},
+        )
+
+        async def _mark_http_called() -> dict[str, object]:
+            nonlocal http_called
+            http_called = True
+            return {"id": "unexpected"}
+
+        with pytest.raises(RuntimeError, match="JSON-RPC error -32602"):
+            await message_transport.message_rpc_call(
+                "send",
+                {"content": "hello"},
+                credential_name="alice",
+                config=config,
+            )
+
+        assert http_called is False
 
     asyncio.run(_run())

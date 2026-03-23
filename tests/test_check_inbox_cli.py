@@ -1,8 +1,8 @@
 """Unit tests for check_inbox CLI routing, scope filtering, and auto-mark-read.
 
 [INPUT]: check_inbox CLI helpers, monkeypatched async entrypoints, and CLI argv
-[OUTPUT]: Regression coverage for inbox scope filtering, auto-mark-read,
-          and group-history dispatch
+[OUTPUT]: Regression coverage for inbox scope filtering, local-cache vs HTTP
+          fallback reads, auto-mark-read, and group-history dispatch
 [POS]: Message CLI unit tests for unified direct/group inbox behavior
 
 [PROTOCOL]:
@@ -16,7 +16,6 @@ import json
 import sys
 import asyncio
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -46,54 +45,223 @@ class TestCheckInboxCli:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
+        remote_calls: list[str] = []
+
         monkeypatch.setattr(
             check_inbox_cli,
             "create_authenticator",
             lambda credential_name, config: (object(), {"did": "did:alice"}),
         )
         monkeypatch.setattr(check_inbox_cli, "is_websocket_mode", lambda config: True)
-        monkeypatch.setattr(check_inbox_cli, "_listener_running", lambda config=None: True)
+        monkeypatch.setattr(
+            check_inbox_cli,
+            "ensure_listener_runtime",
+            lambda credential_name, config=None: {"was_running": True},
+        )
         monkeypatch.setattr(
             check_inbox_cli,
             "_load_local_messages",
             lambda **kwargs: [
                 {
-                    "id": "msg-1",
+                    "id": "local-1",
                     "type": "text",
                     "sender_did": "did:bob",
-                    "content": "hello",
+                    "content": "local hello",
                 }
             ],
+        )
+        monkeypatch.setattr(
+            check_inbox_cli,
+            "create_molt_message_client",
+            lambda config: _DummyAsyncClient(),
+        )
+
+        async def _fake_authenticated_rpc_call(
+            client,
+            endpoint: str,
+            method: str,
+            params: dict[str, object],
+            *,
+            auth: object,
+            credential_name: str,
+        ) -> dict[str, object]:
+            del client, endpoint, auth, credential_name
+            remote_calls.append(method)
+            assert method == "get_inbox"
+            return {
+                "messages": [
+                    {
+                        "id": "remote-1",
+                        "type": "text",
+                        "sender_did": "did:carol",
+                        "content": "remote hello",
+                    }
+                ],
+                "total": 1,
+            }
+
+        monkeypatch.setattr(
+            check_inbox_cli,
+            "authenticated_rpc_call",
+            _fake_authenticated_rpc_call,
+        )
+        monkeypatch.setattr(
+            check_inbox_cli,
+            "_store_inbox_messages",
+            lambda credential_name, my_did, inbox: None,
         )
 
         asyncio.run(check_inbox_cli.check_inbox("alice", 5, "all", False))
 
         payload = json.loads(capsys.readouterr().out)
         assert payload["source"] == "local_ws_cache"
-        assert payload["messages"][0]["content"] == "hello"
+        assert payload["http_sync"]["status"] == "ok"
+        assert remote_calls == ["get_inbox"]
+        assert {message["content"] for message in payload["messages"]} == {
+            "local hello",
+            "remote hello",
+        }
 
-    def test_listener_running_detects_foreground_local_daemon(
+    def test_check_inbox_keeps_local_cache_when_websocket_http_sync_fails(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
-        monkeypatch.setenv("AWIKI_DATA_DIR", str(tmp_path))
-        monkeypatch.setitem(
-            sys.modules,
-            "service_manager",
-            SimpleNamespace(
-                get_service_manager=lambda: SimpleNamespace(
-                    status=lambda: {"running": False}
-                )
-            ),
+        monkeypatch.setattr(
+            check_inbox_cli,
+            "create_authenticator",
+            lambda credential_name, config: (object(), {"did": "did:alice"}),
+        )
+        monkeypatch.setattr(check_inbox_cli, "is_websocket_mode", lambda config: True)
+        monkeypatch.setattr(
+            check_inbox_cli,
+            "ensure_listener_runtime",
+            lambda credential_name, config=None: {"was_running": True},
         )
         monkeypatch.setattr(
             check_inbox_cli,
-            "is_local_daemon_available",
-            lambda config=None: True,
+            "_load_local_messages",
+            lambda **kwargs: [
+                {
+                    "id": "local-1",
+                    "type": "text",
+                    "sender_did": "did:bob",
+                    "content": "local hello",
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            check_inbox_cli,
+            "create_molt_message_client",
+            lambda config: _DummyAsyncClient(),
         )
 
-        assert check_inbox_cli._listener_running(check_inbox_cli.SDKConfig()) is True
+        async def _raise_http_error(
+            client,
+            endpoint: str,
+            method: str,
+            params: dict[str, object],
+            *,
+            auth: object,
+            credential_name: str,
+        ) -> dict[str, object]:
+            del client, endpoint, method, params, auth, credential_name
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(
+            check_inbox_cli,
+            "authenticated_rpc_call",
+            _raise_http_error,
+        )
+
+        asyncio.run(check_inbox_cli.check_inbox("alice", 5, "all", False))
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["source"] == "local_ws_cache"
+        assert payload["messages"][0]["content"] == "local hello"
+        assert payload["http_sync"]["status"] == "error"
+
+    def test_check_inbox_falls_back_to_http_when_websocket_mode_is_degraded(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setattr(
+            check_inbox_cli,
+            "create_authenticator",
+            lambda credential_name, config: (object(), {"did": "did:alice"}),
+        )
+        monkeypatch.setattr(check_inbox_cli, "is_websocket_mode", lambda config: True)
+        monkeypatch.setattr(
+            check_inbox_cli,
+            "ensure_listener_runtime",
+            lambda credential_name, config=None: {
+                "was_running": False,
+                "running": False,
+                "auto_restart_paused": False,
+                "consecutive_restart_failures": 1,
+            },
+        )
+        monkeypatch.setattr(
+            check_inbox_cli,
+            "create_molt_message_client",
+            lambda config: _DummyAsyncClient(),
+        )
+
+        async def _fake_authenticated_rpc_call(
+            client,
+            endpoint: str,
+            method: str,
+            params: dict[str, object],
+            *,
+            auth: object,
+            credential_name: str,
+        ) -> dict[str, object]:
+            del client, endpoint, method, params, auth, credential_name
+            return {
+                "messages": [
+                    {
+                        "id": "msg-1",
+                        "type": "text",
+                        "sender_did": "did:bob",
+                        "content": "hello",
+                    }
+                ],
+                "total": 1,
+            }
+
+        monkeypatch.setattr(
+            check_inbox_cli,
+            "authenticated_rpc_call",
+            _fake_authenticated_rpc_call,
+        )
+        monkeypatch.setattr(
+            check_inbox_cli,
+            "_store_inbox_messages",
+            lambda credential_name, my_did, inbox: None,
+        )
+
+        async def _fake_auto_process_e2ee_messages(
+            messages: list[dict[str, object]],
+            *,
+            local_did: str,
+            auth: object,
+            credential_name: str,
+        ) -> tuple[list[dict[str, object]], list[str], object]:
+            del local_did, auth, credential_name
+            return messages, [], object()
+
+        monkeypatch.setattr(
+            check_inbox_cli,
+            "_auto_process_e2ee_messages",
+            _fake_auto_process_e2ee_messages,
+        )
+
+        asyncio.run(check_inbox_cli.check_inbox("alice", 5, "all", False))
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["source"] == "remote_http_fallback"
+        assert payload["messages"][0]["content"] == "hello"
 
     def test_filter_messages_by_scope_variants(self) -> None:
         messages = [
@@ -563,6 +731,7 @@ class TestCheckInboxCli:
             "create_molt_message_client",
             lambda config: _DummyAsyncClient(),
         )
+        monkeypatch.setattr(check_inbox_cli, "is_websocket_mode", lambda config: False)
         monkeypatch.setattr(
             check_inbox_cli,
             "authenticated_rpc_call",

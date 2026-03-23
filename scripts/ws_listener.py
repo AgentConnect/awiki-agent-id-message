@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """WebSocket listener: long-running background process that receives molt-message pushes and routes to webhooks.
 
 [INPUT]: credential_store (DID identity), SDKConfig, WsClient, ListenerConfig,
          E2eeHandler, service_manager, local_store, logging_config, local daemon
-         settings, authenticated HTTP fallback for secondary credentials
+         settings, authenticated HTTP fallback for secondary credentials, and
+         indexed credential discovery for newly created identities
 [OUTPUT]: WebSocket -> OpenClaw TUI bridge (chat.inject RPC for instant display,
           HTTP webhook fallback) + localhost message daemon for CLI message RPC
           proxying + cross-platform service lifecycle management + local SQLite
           message/group persistence + conditional read acknowledgements only
-          after successful user-visible forwarding
+          after successful user-visible forwarding + runtime auto-enrollment of
+          newly created credentials into remote WebSocket sessions
 [POS]: Standalone background process with cross-platform service management (launchd / systemd / Task Scheduler), reuses utils/ core tool layer
 
 [PROTOCOL]:
@@ -75,6 +78,7 @@ import local_store
 
 logger = logging.getLogger("ws_listener")
 _LOCAL_DAEMON_CONNECT_TIMEOUT_SECONDS = 10.0
+_CREDENTIAL_DISCOVERY_INTERVAL_SECONDS = 2.0
 
 
 class _ActiveWsRpcProxy:
@@ -171,6 +175,28 @@ class _CredentialWsSupervisor:
         for credential_name in credential_names:
             await self.ensure_started(credential_name)
 
+    async def sync_known_credentials(
+        self,
+        primary_credential: str,
+    ) -> list[str]:
+        """Start any newly discovered credentials from the indexed store."""
+        known_credentials = list(list_identities_by_name().keys())
+        if primary_credential not in known_credentials:
+            known_credentials.insert(0, primary_credential)
+        else:
+            known_credentials = [primary_credential] + [
+                name for name in known_credentials if name != primary_credential
+            ]
+
+        started_credentials: list[str] = []
+        for credential_name in known_credentials:
+            existing = self._tasks.get(credential_name)
+            if existing is not None and not existing.done():
+                continue
+            await self.ensure_started(credential_name)
+            started_credentials.append(credential_name)
+        return started_credentials
+
     def get_task(self, credential_name: str) -> asyncio.Task[None] | None:
         """Return the current background task for one credential, if any."""
         return self._tasks.get(credential_name)
@@ -195,6 +221,33 @@ class _CredentialWsSupervisor:
 
 
 # --- Utility Functions --------------------------------------------------------
+
+
+async def _watch_new_credentials(
+    supervisor: _CredentialWsSupervisor,
+    *,
+    primary_credential: str,
+    interval_seconds: float = _CREDENTIAL_DISCOVERY_INTERVAL_SECONDS,
+) -> None:
+    """Poll the credential index and auto-start new WebSocket sessions."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            started_credentials = await supervisor.sync_known_credentials(
+                primary_credential,
+            )
+            if started_credentials:
+                logger.info(
+                    "Discovered new credentials for listener runtime: %s",
+                    ", ".join(started_credentials),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Failed to auto-discover new credentials for ws_listener",
+                exc_info=True,
+            )
 
 def _truncate_did(did: str) -> str:
     """Abbreviate DID for display (first and last 8 characters)."""
@@ -774,7 +827,7 @@ async def _forward(
     tag = f"[#{msg_seq}] " if msg_seq else ""
 
     # Primary: chat.inject (direct TUI injection, no model call)
-    inject_ok = False
+    delivery_ok = False
     inject_params = json.dumps(
         {"sessionKey": "agent:main:main", "message": text},
         ensure_ascii=False,
@@ -794,7 +847,7 @@ async def _forward(
                 "%s%sTUI OK (chat.inject) sender=%s",
                 tag, e2ee_tag, sender,
             )
-            inject_ok = True
+            delivery_ok = True
         else:
             stderr_str = stderr.decode().strip() if stderr else ""
             logger.warning(
@@ -808,25 +861,27 @@ async def _forward(
     except Exception as exc:
         logger.error("%sTUI FAIL (chat.inject) %s", tag, exc)
 
-    # # HTTP /hooks/wake — triggers heartbeat (disabled: TUI + channel send cover delivery)
-    # headers: dict[str, str] = {"Content-Type": "application/json"}
-    # if token:
-    #     headers["Authorization"] = f"Bearer {token}"
-    # body = {"text": text, "mode": "now"}
-    # try:
-    #     resp = await http.post(url, json=body, headers=headers)
-    #     if resp.is_success:
-    #         logger.info(
-    #             "%s%sWake OK [%d] sender=%s",
-    #             tag, e2ee_tag, resp.status_code, sender,
-    #         )
-    #     else:
-    #         logger.warning(
-    #             "%s%sWake FAIL [%d] %s",
-    #             tag, e2ee_tag, resp.status_code, resp.text[:200],
-    #         )
-    # except httpx.HTTPError as exc:
-    #     logger.warning("%sWake FAIL %s", tag, exc)
+    # Secondary: HTTP hook delivery. A successful hook call still counts as a
+    # user-visible forward even if chat.inject is unavailable.
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    body = {"text": text, "mode": "now"}
+    try:
+        resp = await http.post(url, json=body, headers=headers)
+        if resp.is_success:
+            logger.info(
+                "%s%sWake OK [%d] sender=%s",
+                tag, e2ee_tag, resp.status_code, sender,
+            )
+            delivery_ok = True
+        else:
+            logger.warning(
+                "%s%sWake FAIL [%d] %s",
+                tag, e2ee_tag, resp.status_code, resp.text[:200],
+            )
+    except httpx.HTTPError as exc:
+        logger.warning("%sWake FAIL %s", tag, exc)
 
     # External channels: forward to Feishu, Telegram, etc.
     if channels:
@@ -834,7 +889,7 @@ async def _forward(
     elif channels is not None:
         logger.debug("%sNo external channels; skip send", tag)
 
-    return inject_ok
+    return delivery_ok
 
 
 async def _heartbeat_task(ws: WsClient, interval: float, ping_event: asyncio.Event) -> None:
@@ -1383,20 +1438,34 @@ def cmd_run(args: argparse.Namespace) -> None:
             daemon_settings.host,
             daemon_settings.port,
         )
+        credential_watch: asyncio.Task[None] | None = None
         try:
-            known_credentials = list(list_identities_by_name().keys())
-            if args.credential not in known_credentials:
-                known_credentials.insert(0, args.credential)
-            else:
-                known_credentials = [args.credential] + [
-                    name for name in known_credentials if name != args.credential
-                ]
-            await supervisor.ensure_all_started(known_credentials)
+            started_credentials = await supervisor.sync_known_credentials(
+                args.credential,
+            )
+            if started_credentials:
+                logger.info(
+                    "Initialized listener credentials: %s",
+                    ", ".join(started_credentials),
+                )
+            credential_watch = asyncio.create_task(
+                _watch_new_credentials(
+                    supervisor,
+                    primary_credential=args.credential,
+                ),
+                name="ws_listener[credential-watch]",
+            )
             primary_task = supervisor.get_task(args.credential)
             if primary_task is None:
                 raise RuntimeError("Primary credential listener task was not created")
             await primary_task
         finally:
+            if credential_watch is not None and not credential_watch.done():
+                credential_watch.cancel()
+                try:
+                    await credential_watch
+                except asyncio.CancelledError:
+                    pass
             await local_daemon.close()
             await supervisor.close()
 

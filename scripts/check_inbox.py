@@ -24,12 +24,14 @@ Usage:
 
 [INPUT]: SDK (RPC calls), credential_store (load identity credentials), local_store,
          E2EE runtime helpers, group RPC history reads, outbox tracking,
-         logging_config, local daemon availability probing
+         listener recovery helpers, logging_config
 [OUTPUT]: Inbox message list / private-or-group history / mark-read result,
           with optional auto-mark-read during inbox fetches, immediate private
           E2EE protocol processing, plaintext decryption when possible, local
-          group snapshot persistence, and automatic local incremental cursors
-          for group history reads
+          group snapshot persistence, automatic local incremental cursors for
+          group history reads, HTTP fallback when WebSocket mode is degraded,
+          and best-effort HTTP inbox sync even while WebSocket local-cache mode
+          is active
 [POS]: Unified message receiving and history script for private chats and
        discovery-group reads
 
@@ -57,7 +59,7 @@ from utils.logging_config import configure_logging
 from credential_store import create_authenticator, load_identity
 from e2ee_outbox import record_remote_failure
 from e2ee_store import load_e2ee_state, save_e2ee_state
-from message_daemon import is_local_daemon_available
+from listener_recovery import ensure_listener_runtime
 from message_transport import is_websocket_mode, message_rpc_call
 from utils.e2ee import (
     SUPPORTED_E2EE_VERSION,
@@ -176,17 +178,98 @@ def _filter_messages_by_scope(
     return [msg for msg in messages if not msg.get("group_id")]
 
 
-def _listener_running(config: SDKConfig | None = None) -> bool:
-    """Return whether the background listener service is currently running."""
-    resolved = config or SDKConfig.load()
-    try:
-        from service_manager import get_service_manager
+def _message_dedup_key(message: dict[str, Any]) -> tuple[Any, ...]:
+    """Build a stable deduplication key for merged inbox messages."""
+    message_id = _message_id(message)
+    if message_id:
+        return ("id", message_id)
+    return (
+        "fallback",
+        message.get("sender_did"),
+        message.get("receiver_did"),
+        message.get("group_id"),
+        message.get("type"),
+        message.get("content"),
+        _message_time_value(message),
+    )
 
-        if bool(get_service_manager().status().get("running", False)):
-            return True
-    except Exception:
-        logger.debug("Failed to query listener service manager status", exc_info=True)
-    return is_local_daemon_available(config=resolved)
+
+def _message_display_sort_key(message: dict[str, Any]) -> tuple[Any, ...]:
+    """Build a descending-friendly display key for merged inbox messages."""
+    server_seq = message.get("server_seq")
+    has_server_seq = 1 if isinstance(server_seq, int) else 0
+    server_seq_value = server_seq if isinstance(server_seq, int) else -1
+    return (
+        has_server_seq,
+        server_seq_value,
+        _message_time_value(message),
+        str(message.get("id") or message.get("msg_id") or ""),
+    )
+
+
+def _merge_inbox_messages(
+    local_messages: list[dict[str, Any]],
+    remote_messages: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Merge local unread cache with remote HTTP inbox messages."""
+    merged_by_key: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for message in remote_messages:
+        merged_by_key[_message_dedup_key(message)] = dict(message)
+    for message in local_messages:
+        merged_by_key[_message_dedup_key(message)] = dict(message)
+    merged = list(merged_by_key.values())
+    merged.sort(key=_message_display_sort_key, reverse=True)
+    return merged[:limit]
+
+
+async def _sync_remote_inbox_messages(
+    *,
+    credential_name: str,
+    auth: Any,
+    owner_did: str,
+    limit: int,
+    scope: str,
+    config: SDKConfig,
+) -> dict[str, Any]:
+    """Best-effort HTTP inbox sync used while websocket local-cache mode is active."""
+    result: dict[str, Any] = {
+        "attempted": True,
+        "status": "ok",
+        "messages": [],
+        "total": 0,
+    }
+    try:
+        async with create_molt_message_client(config) as client:
+            inbox = await authenticated_rpc_call(
+                client,
+                MESSAGE_RPC,
+                "get_inbox",
+                params={"user_did": owner_did, "limit": limit},
+                auth=auth,
+                credential_name=credential_name,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "HTTP inbox sync failed in websocket mode credential=%s error=%s",
+            credential_name,
+            exc,
+        )
+        result["status"] = "error"
+        result["error"] = str(exc)
+        return result
+
+    _store_inbox_messages(credential_name, owner_did, inbox)
+    visible_messages = [
+        _strip_hidden_user_fields(message)
+        for message in inbox.get("messages", [])
+        if str(message.get("type") or "") not in _E2EE_MSG_TYPES
+    ]
+    filtered_messages = _filter_messages_by_scope(visible_messages, scope)
+    result["messages"] = filtered_messages
+    result["total"] = len(filtered_messages)
+    return result
 
 
 def _load_local_messages(
@@ -515,52 +598,80 @@ async def check_inbox(
 ) -> None:
     """View inbox and optionally mark returned messages as read."""
     config = SDKConfig()
+    websocket_mode = is_websocket_mode(config)
     auth_result = create_authenticator(credential_name, config)
     if auth_result is None:
         print(f"Credential '{credential_name}' unavailable; please create an identity first")
         sys.exit(1)
 
     auth, data = auth_result
-    if is_websocket_mode(config):
-        if not _listener_running(config):
-            print(
-                "WebSocket receive mode is enabled, but the background listener is not running. "
-                "Run `python scripts/setup_realtime.py --receive-mode websocket` first."
-            )
-            sys.exit(1)
-        messages = _load_local_messages(
-            owner_did=data["did"],
-            limit=limit,
-            scope=scope,
+    if websocket_mode:
+        listener_status = ensure_listener_runtime(
+            credential_name,
+            config=config,
         )
-        if mark_read:
-            message_ids = _collect_readable_message_ids(
-                messages,
-                local_did=str(data["did"]),
+        if listener_status.get("was_running", False):
+            local_messages = _load_local_messages(
+                owner_did=data["did"],
+                limit=limit,
+                scope=scope,
             )
-            if message_ids:
-                await message_rpc_call(
-                    "mark_read",
-                    {
-                        "user_did": data["did"],
-                        "message_ids": message_ids,
-                    },
-                    credential_name=credential_name,
-                    config=config,
+            remote_sync = await _sync_remote_inbox_messages(
+                credential_name=credential_name,
+                auth=auth,
+                owner_did=str(data["did"]),
+                limit=limit,
+                scope=scope,
+                config=config,
+            )
+            messages = _merge_inbox_messages(
+                local_messages,
+                remote_sync.get("messages", []),
+                limit=limit,
+            )
+            if mark_read:
+                message_ids = _collect_readable_message_ids(
+                    messages,
+                    local_did=str(data["did"]),
                 )
-                _mark_local_messages_read(
-                    credential_name=credential_name,
-                    owner_did=str(data["did"]),
-                    message_ids=message_ids,
-                )
-        inbox = {
-            "messages": messages,
-            "total": len(messages),
-            "scope": scope,
-            "source": "local_ws_cache",
-        }
-        print(json.dumps(inbox, indent=2, ensure_ascii=False))
-        return
+                if message_ids:
+                    await message_rpc_call(
+                        "mark_read",
+                        {
+                            "user_did": data["did"],
+                            "message_ids": message_ids,
+                        },
+                        credential_name=credential_name,
+                        config=config,
+                    )
+                    _mark_local_messages_read(
+                        credential_name=credential_name,
+                        owner_did=str(data["did"]),
+                        message_ids=message_ids,
+                    )
+            inbox = {
+                "messages": messages,
+                "total": len(messages),
+                "scope": scope,
+                "source": "local_ws_cache",
+                "http_sync": {
+                    "attempted": True,
+                    "status": remote_sync.get("status", "error"),
+                    "total": remote_sync.get("total", 0),
+                },
+            }
+            if isinstance(remote_sync.get("error"), str):
+                inbox["http_sync"]["error"] = remote_sync["error"]
+            print(json.dumps(inbox, indent=2, ensure_ascii=False))
+            return
+        logger.warning(
+            "WebSocket receive mode is degraded, using HTTP inbox fallback "
+            "credential=%s running=%s paused=%s failures=%s",
+            credential_name,
+            listener_status.get("running", False),
+            listener_status.get("auto_restart_paused", False),
+            listener_status.get("consecutive_restart_failures", 0),
+        )
 
     async with create_molt_message_client(config) as client:
         inbox = await authenticated_rpc_call(
@@ -587,6 +698,9 @@ async def check_inbox(
         inbox["messages"] = rendered_messages
         inbox["total"] = len(rendered_messages)
         inbox["scope"] = scope
+        inbox["source"] = (
+            "remote_http_fallback" if websocket_mode else "remote_http"
+        )
 
         ids_to_mark = processed_ids
         if mark_read:
@@ -623,32 +737,41 @@ async def get_history(
 ) -> None:
     """View chat history with a specific DID and immediately render E2EE plaintext when possible."""
     config = SDKConfig()
+    websocket_mode = is_websocket_mode(config)
     auth_result = create_authenticator(credential_name, config)
     if auth_result is None:
         print(f"Credential '{credential_name}' unavailable; please create an identity first")
         sys.exit(1)
 
     auth, data = auth_result
-    if is_websocket_mode(config):
-        if not _listener_running(config):
-            print(
-                "WebSocket receive mode is enabled, but the background listener is not running. "
-                "Run `python scripts/setup_realtime.py --receive-mode websocket` first."
-            )
-            sys.exit(1)
-        messages = _load_local_messages(
-            owner_did=data["did"],
-            limit=limit,
-            peer_did=peer_did,
-            incoming_only=False,
+    if websocket_mode:
+        listener_status = ensure_listener_runtime(
+            credential_name,
+            config=config,
         )
-        history = {
-            "messages": messages,
-            "total": len(messages),
-            "source": "local_ws_cache",
-        }
-        print(json.dumps(history, indent=2, ensure_ascii=False))
-        return
+        if listener_status.get("was_running", False):
+            messages = _load_local_messages(
+                owner_did=data["did"],
+                limit=limit,
+                peer_did=peer_did,
+                incoming_only=False,
+            )
+            history = {
+                "messages": messages,
+                "total": len(messages),
+                "source": "local_ws_cache",
+            }
+            print(json.dumps(history, indent=2, ensure_ascii=False))
+            return
+        logger.warning(
+            "WebSocket receive mode is degraded, using HTTP history fallback "
+            "credential=%s peer=%s running=%s paused=%s failures=%s",
+            credential_name,
+            peer_did,
+            listener_status.get("running", False),
+            listener_status.get("auto_restart_paused", False),
+            listener_status.get("consecutive_restart_failures", 0),
+        )
 
     async with create_molt_message_client(config) as client:
         history = await authenticated_rpc_call(
@@ -677,6 +800,9 @@ async def get_history(
         )
         history["messages"] = rendered_messages
         history["total"] = len(rendered_messages)
+        history["source"] = (
+            "remote_http_fallback" if websocket_mode else "remote_http"
+        )
 
         print(json.dumps(history, indent=2, ensure_ascii=False))
 

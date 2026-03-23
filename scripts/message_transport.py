@@ -1,8 +1,10 @@
 """Message transport selection and RPC helpers.
 
-[INPUT]: settings.json, credential_store, SDKConfig, HTTP RPC helpers, local daemon
+[INPUT]: settings.json, credential_store, SDKConfig, HTTP RPC helpers, local
+         daemon, listener recovery helpers
 [OUTPUT]: receive-mode helpers plus credential-aware message RPC call helpers
-          over HTTP or the local WebSocket-mode daemon
+          over HTTP or the local WebSocket-mode daemon with automatic HTTP
+          fallback for WebSocket transport failures
 [POS]: Shared transport abstraction for message-domain scripts, centralizing whether
        message RPC traffic should use direct HTTP JSON-RPC or the localhost daemon
        that owns the single remote WebSocket connection.
@@ -15,10 +17,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 from credential_store import create_authenticator
+from listener_recovery import ensure_listener_runtime, note_listener_healthy
 from message_daemon import call_local_daemon, load_local_daemon_settings
 from utils.client import create_molt_message_client
 from utils.config import SDKConfig
@@ -28,6 +32,17 @@ MESSAGE_RPC = "/message/rpc"
 RECEIVE_MODE_HTTP = "http"
 RECEIVE_MODE_WEBSOCKET = "websocket"
 _VALID_RECEIVE_MODES = {RECEIVE_MODE_HTTP, RECEIVE_MODE_WEBSOCKET}
+_WEBSOCKET_FALLBACK_ERROR_MARKERS = (
+    "Local message daemon token is missing",
+    "Local message daemon request timed out",
+    "Local message daemon is unavailable",
+    "Remote WebSocket transport is not connected",
+    "WebSocket not connected",
+    "WebSocket reader failed",
+    "WebSocket reader stopped",
+    "WebSocket closed",
+)
+logger = logging.getLogger(__name__)
 
 
 def load_receive_mode(config: SDKConfig | None = None) -> str:
@@ -114,18 +129,51 @@ async def message_rpc_call(
     resolved = config or SDKConfig.load()
     mode = force_mode or load_receive_mode(resolved)
     if mode == RECEIVE_MODE_WEBSOCKET:
-        return await websocket_message_rpc_call(
-            method,
-            params,
-            credential_name=credential_name,
-            config=resolved,
-        )
+        try:
+            result = await websocket_message_rpc_call(
+                method,
+                params,
+                credential_name=credential_name,
+                config=resolved,
+            )
+            note_listener_healthy(credential_name, config=resolved)
+            return result
+        except Exception as exc:  # noqa: BLE001
+            if not _should_fallback_to_http(exc):
+                raise
+            logger.warning(
+                "WebSocket message RPC unavailable, falling back to HTTP "
+                "credential=%s method=%s error=%s",
+                credential_name,
+                method,
+                exc,
+            )
+            try:
+                ensure_listener_runtime(credential_name, config=resolved)
+            except Exception:  # noqa: BLE001
+                logger.debug("Failed to run listener recovery after WebSocket RPC error", exc_info=True)
+            return await http_message_rpc_call(
+                method,
+                params,
+                credential_name=credential_name,
+                config=resolved,
+            )
     return await http_message_rpc_call(
         method,
         params,
         credential_name=credential_name,
         config=resolved,
     )
+
+
+def _should_fallback_to_http(exc: BaseException) -> bool:
+    """Return whether one WebSocket RPC failure should fall back to HTTP."""
+    message = str(exc)
+    if not message:
+        return False
+    if message.startswith("JSON-RPC error"):
+        return False
+    return any(marker in message for marker in _WEBSOCKET_FALLBACK_ERROR_MARKERS)
 
 
 def write_receive_mode(

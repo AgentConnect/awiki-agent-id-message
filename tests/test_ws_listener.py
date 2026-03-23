@@ -1,9 +1,9 @@
 """Regression tests for ws_listener credential routing and reconnect catch-up.
 
 [INPUT]: ws_listener helpers with monkeypatched auth, RPC, routing, and storage
-[OUTPUT]: Coverage for secondary-credential daemon sends, paginated catch-up,
-          normalized offline message persistence, and read-mark gating on
-          forwarding success
+[OUTPUT]: Coverage for secondary-credential daemon sends, runtime credential
+          discovery, paginated catch-up, normalized offline message
+          persistence, and read-mark gating on forwarding success
 [POS]: WebSocket listener unit tests for daemon proxying and reconnect recovery
 
 [PROTOCOL]:
@@ -164,6 +164,60 @@ def test_credential_ws_supervisor_starts_all_known_credentials(
             await supervisor.ensure_all_started(["default", "sender"])
             await asyncio.sleep(0)
             assert started == ["default", "sender"]
+        finally:
+            await supervisor.close()
+
+    asyncio.run(_run())
+
+
+def test_credential_ws_supervisor_syncs_new_credentials_created_after_start(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Runtime credential discovery should auto-start identities created later."""
+    started: list[str] = []
+    identity_snapshots = [
+        {"default": {"did": "did:default"}},
+        {"default": {"did": "did:default"}, "late": {"did": "did:late"}},
+    ]
+
+    async def _fake_listen_loop(
+        credential_name: str,
+        cfg: object,
+        config: SDKConfig | None = None,
+        rpc_proxy: ws_listener._ActiveWsRpcProxy | None = None,
+    ) -> None:
+        del cfg, config
+        started.append(credential_name)
+        assert rpc_proxy is not None
+        rpc_proxy.set_client(
+            credential_name,
+            _FakeWsClient(responses=[{"id": f"{credential_name}-msg"}]),
+        )
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(ws_listener, "listen_loop", _fake_listen_loop)
+    monkeypatch.setattr(
+        ws_listener,
+        "list_identities_by_name",
+        lambda: identity_snapshots.pop(0),
+    )
+
+    async def _run() -> None:
+        supervisor = ws_listener._CredentialWsSupervisor(
+            cfg=object(),
+            config=_build_config(tmp_path),
+        )
+        try:
+            initial = await supervisor.sync_known_credentials("default")
+            await asyncio.sleep(0)
+            assert initial == ["default"]
+            assert started == ["default"]
+
+            discovered = await supervisor.sync_known_credentials("default")
+            await asyncio.sleep(0)
+            assert discovered == ["late"]
+            assert started == ["default", "late"]
         finally:
             await supervisor.close()
 
@@ -580,3 +634,49 @@ def test_listen_loop_keeps_message_unread_when_forward_fails(
 
     assert stored_messages == ["msg-live-fail"]
     assert mark_read_calls == []
+
+
+def test_forward_counts_successful_http_hook_as_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HTTP hook success should still mark the forward path as delivered."""
+
+    async def _fake_create_subprocess_exec(*args, **kwargs):
+        del args, kwargs
+        raise FileNotFoundError
+
+    class _FakeHttp:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]):
+            self.calls.append({"url": url, "json": json, "headers": headers})
+            return SimpleNamespace(is_success=True, status_code=200, text="ok")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    http = _FakeHttp()
+    result = asyncio.run(
+        ws_listener._forward(
+            http=http,
+            url="http://127.0.0.1:18789/hooks/wake",
+            token="token-123",
+            params={"sender_did": "did:bob", "content": "hello"},
+            route="wake",
+            cfg=SimpleNamespace(),
+            channels=[],
+            msg_seq=1,
+        )
+    )
+
+    assert result is True
+    assert http.calls == [
+        {
+            "url": "http://127.0.0.1:18789/hooks/wake",
+            "json": {"text": "[IM] did:bob: hello", "mode": "now"},
+            "headers": {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer token-123",
+            },
+        }
+    ]
