@@ -149,6 +149,7 @@ class LocalMessageDaemon:
             self._handle_client,
             host=self._settings.host,
             port=self._settings.port,
+            reuse_address=True,
         )
 
     async def close(self) -> None:
