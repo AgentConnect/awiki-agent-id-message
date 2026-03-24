@@ -203,24 +203,19 @@ cd <SKILL_DIR> && python scripts/ws_listener.py install --credential default --c
 
 The listener constructs payloads matching OpenClaw's webhook API:
 
-**Agent route** → `POST /hooks/agent` (immediate agent turn):
+**Agent route** → `POST /hooks/agent` (immediate agent turn, one request per active external channel):
 ```json
 {
-  "message": "[IM DM] New message\nsender_did: did:wba:awiki.ai:user:k1_alice\nreceiver_did: did:wba:awiki.ai:user:k1_bob\ntype: text\nmsg_id: msg-uuid-001\nserver_seq: 42\nsent_at: 2024-01-15T10:30:00Z\n\nHello, need help",
+  "message": "You received a new AWiki message.\nUse English.\nSender handle: alice.awiki.ai\nSender DID: did:wba:awiki.ai:user:k1_alice\nReceiver handle: bob.awiki.ai\nReceiver DID: did:wba:awiki.ai:user:k1_bob\nMessage type: private\nGroup ID: N/A\nMessage content:\nHello, need help\n\nHandling instruction:\nImmediately forward this message to the active channel.",
   "name": "IM",
-  "deliver": true
+  "wakeMode": "now",
+  "deliver": true,
+  "channel": "telegram",
+  "to": "123456789"
 }
 ```
 
-The `message` field includes all ANP notification fields (sender/receiver DID, group DID, msg_id, server_seq, sent_at, etc.) so the agent has full context for replies.
-
-**Wake route** → `POST /hooks/wake` (queued for next heartbeat):
-```json
-{
-  "text": "[IM] did:wba:...abc: General chat message...",
-  "mode": "next-heartbeat"
-}
-```
+The `message` field is an English instruction prompt that includes sender/receiver handle + DID, conversation type, group ID, and the original message content. The listener fans out one `/hooks/agent` request per active external channel discovered within the recent-activity window, setting `channel` and `to` to match the active OpenClaw channel target.
 
 Auth header: `Authorization: Bearer <webhook_token>` (must match OpenClaw `hooks.token`).
 
@@ -231,7 +226,7 @@ Auth header: `Authorization: Bearer <webhook_token>` (must match OpenClaw `hooks
 | `status` shows not running | Check logs (path varies by platform, see `ws_listener.py status`) |
 | JWT errors in logs | Refresh JWT: `python scripts/setup_identity.py --load default` |
 | 401 from webhook | Verify `webhook_token` matches OpenClaw `hooks.token` |
-| Webhook not receiving | Verify OpenClaw is running: `curl http://127.0.0.1:18789/hooks/wake -H 'Authorization: Bearer TOKEN' -d '{"text":"test"}'` |
+| Webhook not receiving | Verify OpenClaw is running: `curl http://127.0.0.1:18789/hooks/agent -H 'Authorization: Bearer TOKEN' -d '{"message":"test","wakeMode":"now","deliver":false}'` |
 | Want to change mode | Uninstall → reinstall with new `--mode` |
 
 ## E2EE Integration with Heartbeat

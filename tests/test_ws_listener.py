@@ -142,6 +142,44 @@ def test_build_event_text_includes_sender_handle_and_did_for_agent_route() -> No
     )
 
 
+def test_build_agent_hook_message_includes_required_awiki_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The /hooks/agent prompt should carry the required AWiki metadata in English."""
+    monkeypatch.setattr(
+        ws_listener,
+        "load_identity",
+        lambda credential_name: {
+            "did": "did:wba:awiki.ai:user:k1_receiver",
+            "handle": "receiver",
+        },
+    )
+
+    message = ws_listener._build_agent_hook_message(
+        {
+            "sender_handle": "zhuocheng",
+            "sender_handle_domain": "awiki.ai",
+            "sender_did": "did:wba:awiki.ai:user:k1_sender",
+            "group_id": "grp_123",
+            "content": "hello from awiki",
+        },
+        my_did="did:wba:awiki.ai:user:k1_receiver",
+        credential_name="default",
+    )
+
+    assert "You received a new AWiki message." in message
+    assert "Use English." in message
+    assert "Sender handle: zhuocheng.awiki.ai" in message
+    assert "Sender DID: did:wba:awiki.ai:user:k1_sender" in message
+    assert "Receiver handle: receiver.awiki.ai" in message
+    assert "Receiver DID: did:wba:awiki.ai:user:k1_receiver" in message
+    assert "Message type: group" in message
+    assert "Group ID: grp_123" in message
+    assert "Message content:" in message
+    assert "hello from awiki" in message
+    assert "Immediately forward this message to the active channel." in message
+
+
 def test_active_ws_rpc_proxy_routes_calls_by_credential(
     tmp_path: Path,
 ) -> None:
@@ -374,6 +412,7 @@ def test_catch_up_inbox_paginates_before_advancing_cursor(
             credential_name="default",
             my_did="did:alice",
             cfg=SimpleNamespace(
+                agent_webhook_url="http://127.0.0.1/hooks/agent",
                 wake_webhook_url="http://127.0.0.1/hooks/wake",
                 webhook_token="token",
             ),
@@ -473,6 +512,7 @@ def test_catch_up_inbox_persists_normalized_e2ee_messages(
             credential_name="default",
             my_did="did:alice",
             cfg=SimpleNamespace(
+                agent_webhook_url="http://127.0.0.1/hooks/agent",
                 wake_webhook_url="http://127.0.0.1/hooks/wake",
                 webhook_token="token",
             ),
@@ -558,6 +598,7 @@ def test_catch_up_inbox_keeps_message_unread_when_forward_fails(
             credential_name="default",
             my_did="did:alice",
             cfg=SimpleNamespace(
+                agent_webhook_url="http://127.0.0.1/hooks/agent",
                 wake_webhook_url="http://127.0.0.1/hooks/wake",
                 webhook_token="token",
             ),
@@ -705,6 +746,7 @@ def test_listen_loop_keeps_message_unread_when_forward_fails(
         e2ee_decrypt_fail_action="drop",
         mode="smart",
         heartbeat_interval=60.0,
+        agent_webhook_url="http://127.0.0.1/hooks/agent",
         wake_webhook_url="http://127.0.0.1/hooks/wake",
         webhook_token="token",
     )
@@ -725,7 +767,7 @@ def test_listen_loop_keeps_message_unread_when_forward_fails(
 def test_forward_counts_successful_http_hook_as_delivery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """HTTP hook success should still mark the forward path as delivered."""
+    """Agent hook success should still mark the forward path as delivered."""
 
     async def _fake_create_subprocess_exec(*args, **kwargs):
         del args, kwargs
@@ -740,17 +782,32 @@ def test_forward_counts_successful_http_hook_as_delivery(
             return SimpleNamespace(is_success=True, status_code=200, text="ok")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(
+        ws_listener,
+        "load_identity",
+        lambda credential_name: {
+            "did": "did:wba:awiki.ai:user:k1_receiver",
+            "handle": "receiver",
+        },
+    )
 
     http = _FakeHttp()
     result = asyncio.run(
         ws_listener._forward(
             http=http,
-            url="http://127.0.0.1:18789/hooks/wake",
+            url="http://127.0.0.1:18789/hooks/agent",
             token="token-123",
-            params={"sender_did": "did:bob", "content": "hello"},
+            params={
+                "sender_handle": "zhuocheng",
+                "sender_handle_domain": "awiki.ai",
+                "sender_did": "did:wba:awiki.ai:user:k1_sender",
+                "content": "hello",
+            },
             route="wake",
-            cfg=SimpleNamespace(),
-            channels=[],
+            cfg=SimpleNamespace(agent_hook_name="IM"),
+            my_did="did:wba:awiki.ai:user:k1_receiver",
+            credential_name="default",
+            channels=[("telegram", "chat-123")],
             msg_seq=1,
         )
     )
@@ -758,8 +815,28 @@ def test_forward_counts_successful_http_hook_as_delivery(
     assert result is True
     assert http.calls == [
         {
-            "url": "http://127.0.0.1:18789/hooks/wake",
-            "json": {"text": "[IM] did:bob: hello", "mode": "now"},
+            "url": "http://127.0.0.1:18789/hooks/agent",
+            "json": {
+                "message": (
+                    "You received a new AWiki message.\n"
+                    "Use English.\n"
+                    "Sender handle: zhuocheng.awiki.ai\n"
+                    "Sender DID: did:wba:awiki.ai:user:k1_sender\n"
+                    "Receiver handle: receiver.awiki.ai\n"
+                    "Receiver DID: did:wba:awiki.ai:user:k1_receiver\n"
+                    "Message type: private\n"
+                    "Group ID: N/A\n"
+                    "Message content:\n"
+                    "hello\n\n"
+                    "Handling instruction:\n"
+                    "Immediately forward this message to the active channel."
+                ),
+                "name": "IM",
+                "wakeMode": "now",
+                "deliver": True,
+                "channel": "telegram",
+                "to": "chat-123",
+            },
             "headers": {
                 "Content-Type": "application/json",
                 "Authorization": "Bearer token-123",

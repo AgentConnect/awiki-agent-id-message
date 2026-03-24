@@ -388,6 +388,63 @@ def _build_sender_handle(params: dict[str, Any]) -> str | None:
     return normalized_handle
 
 
+def _build_receiver_handle(
+    my_did: str,
+    credential_name: str,
+) -> str | None:
+    """Return the local receiver handle in full form when available."""
+    credential = load_identity(credential_name)
+    if credential is None:
+        return None
+    raw_handle = credential.get("handle")
+    if not isinstance(raw_handle, str):
+        return None
+    normalized_handle = raw_handle.strip()
+    if not normalized_handle:
+        return None
+    if "." in normalized_handle:
+        return normalized_handle
+    did_domain = SDKConfig().did_domain.strip()
+    if not did_domain:
+        return normalized_handle
+    if credential.get("did") != my_did:
+        return normalized_handle
+    return f"{normalized_handle}.{did_domain}"
+
+
+def _build_agent_hook_message(
+    params: dict[str, Any],
+    *,
+    my_did: str,
+    credential_name: str,
+) -> str:
+    """Build the English prompt payload for ``/hooks/agent``."""
+    sender_handle = _build_sender_handle(params) or "unknown"
+    sender_did = str(params.get("sender_did") or "unknown")
+    receiver_handle = _build_receiver_handle(my_did, credential_name) or "unknown"
+    receiver_did = my_did or str(params.get("receiver_did") or "unknown")
+    message_kind = "group" if params.get("group_id") or params.get("group_did") else "private"
+    group_id = str(params.get("group_id") or params.get("group_did") or "N/A")
+    message_content = str(params.get("content") or "")
+
+    lines = [
+        "You received a new AWiki message.",
+        "Use English.",
+        f"Sender handle: {sender_handle}",
+        f"Sender DID: {sender_did}",
+        f"Receiver handle: {receiver_handle}",
+        f"Receiver DID: {receiver_did}",
+        f"Message type: {message_kind}",
+        f"Group ID: {group_id}",
+        "Message content:",
+        message_content,
+        "",
+        "Handling instruction:",
+        "Immediately forward this message to the active channel.",
+    ]
+    return "\n".join(lines)
+
+
 _CHANNEL_ACTIVE_HOURS = 24  # only forward to channels active within this window
 _CHANNEL_CACHE_FILE_NAME = "external-channels.json"
 _INBOX_SYNC_FILE_NAME = "inbox-sync.json"
@@ -688,11 +745,13 @@ async def _catch_up_inbox(
         )
         inject_ok = await _forward(
             http,
-            cfg.wake_webhook_url,
+            cfg.agent_webhook_url,
             cfg.webhook_token,
             msg,
             route,
             cfg,
+            my_did,
+            credential_name,
             channels,
             msg_seq,
         )
@@ -809,37 +868,6 @@ async def _fetch_external_channels() -> list[tuple[str, str]]:
         return []
 
 
-async def _send_to_channels(text: str, channels: list[tuple[str, str]], msg_seq: int = 0) -> None:
-    """Forward message text to external channels via openclaw message send."""
-    tag = f"[#{msg_seq}] " if msg_seq else ""
-    for channel, target in channels:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                _OPENCLAW_BIN, "message", "send",
-                "--channel", channel,
-                "--target", target,
-                "--message", text,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
-            if proc.returncode == 0:
-                logger.info("%s%s OK -> %s", tag, channel, target)
-            else:
-                stderr_str = stderr.decode().strip() if stderr else ""
-                logger.warning(
-                    "%s%s FAIL -> %s exit=%d stderr=%s",
-                    tag, channel, target, proc.returncode, stderr_str[:200],
-                )
-        except asyncio.TimeoutError:
-            logger.warning("%s%s FAIL -> %s timeout", tag, channel, target)
-        except FileNotFoundError:
-            logger.warning("openclaw CLI not found at %s", _OPENCLAW_BIN)
-            break
-        except Exception as exc:
-            logger.error("%s%s FAIL -> %s: %s", tag, channel, target, exc)
-
-
 async def _forward(
     http: httpx.AsyncClient,
     url: str,
@@ -847,13 +875,20 @@ async def _forward(
     params: dict[str, Any],
     route: str,
     cfg: ListenerConfig,
+    my_did: str,
+    credential_name: str,
     channels: list[tuple[str, str]] | None = None,
     msg_seq: int = 0,
 ) -> bool:
-    """Forward a message to OpenClaw via ``chat.inject`` + HTTP ``/hooks/wake`` + external channels."""
+    """Forward a message to OpenClaw via ``chat.inject`` + HTTP ``/hooks/agent``."""
     e2ee_tag = "[E2EE] " if params.get("_e2ee") else ""
     sender = _truncate_did(params.get("sender_did", "unknown"))
     text = _build_event_text(params, route, cfg)
+    agent_message = _build_agent_hook_message(
+        params,
+        my_did=my_did,
+        credential_name=credential_name,
+    )
     tag = f"[#{msg_seq}] " if msg_seq else ""
 
     # Primary: chat.inject (direct TUI injection, no model call)
@@ -891,33 +926,42 @@ async def _forward(
     except Exception as exc:
         logger.error("%sTUI FAIL (chat.inject) %s", tag, exc)
 
-    # Secondary: HTTP hook delivery. A successful hook call still counts as a
-    # user-visible forward even if chat.inject is unavailable.
+    # Secondary: HTTP agent-hook delivery. One request is sent per active
+    # external channel so OpenClaw can deliver the agent response back to that
+    # channel directly.
     headers: dict[str, str] = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    body = {"text": text, "mode": "now"}
-    try:
-        resp = await http.post(url, json=body, headers=headers)
-        if resp.is_success:
-            logger.info(
-                "%s%sWake OK [%d] sender=%s",
-                tag, e2ee_tag, resp.status_code, sender,
-            )
-            delivery_ok = True
-        else:
-            logger.warning(
-                "%s%sWake FAIL [%d] %s",
-                tag, e2ee_tag, resp.status_code, resp.text[:200],
-            )
-    except httpx.HTTPError as exc:
-        logger.warning("%sWake FAIL %s", tag, exc)
-
-    # External channels: forward to Feishu, Telegram, etc.
     if channels:
-        await _send_to_channels(text, channels, msg_seq)
+        for channel, target in channels:
+            body = {
+                "message": agent_message,
+                "name": cfg.agent_hook_name,
+                "wakeMode": "now",
+                "deliver": True,
+                "channel": channel,
+                "to": target,
+            }
+            try:
+                resp = await http.post(url, json=body, headers=headers)
+                if resp.is_success:
+                    logger.info(
+                        "%s%sAgent hook OK [%d] sender=%s channel=%s target=%s",
+                        tag, e2ee_tag, resp.status_code, sender, channel, target,
+                    )
+                    delivery_ok = True
+                else:
+                    logger.warning(
+                        "%s%sAgent hook FAIL [%d] channel=%s target=%s body=%s",
+                        tag, e2ee_tag, resp.status_code, channel, target, resp.text[:200],
+                    )
+            except httpx.HTTPError as exc:
+                logger.warning(
+                    "%sAgent hook FAIL channel=%s target=%s error=%s",
+                    tag, channel, target, exc,
+                )
     elif channels is not None:
-        logger.debug("%sNo external channels; skip send", tag)
+        logger.debug("%sNo external channels; skip /hooks/agent delivery", tag)
 
     return delivery_ok
 
@@ -1311,8 +1355,8 @@ async def listen_loop(
                             )
                             continue
 
-                        # All routes now use /hooks/wake to inject into main session
-                        url = cfg.wake_webhook_url
+                        # All routes now use /hooks/agent for the agent turn.
+                        url = cfg.agent_webhook_url
                         logger.info(
                             "[#%d] Forwarding: route=%s sender=%s",
                             msg_seq, route, _truncate_did(params.get("sender_did", "")),
@@ -1344,6 +1388,8 @@ async def listen_loop(
                             params,
                             route,
                             cfg,
+                            my_did,
+                            credential_name,
                             ext_channels,
                             msg_seq,
                         )
