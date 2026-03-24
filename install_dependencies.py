@@ -5,7 +5,8 @@ Supports pip installation.
 
 [INPUT]: None
 [OUTPUT]: Install dependencies required by awiki-did and run local database
-          upgrade checks after installation
+          upgrade checks after installation, including listener stop/restart
+          coordination for explicit upgrade flows
 [POS]: Project root, provides pip installation and post-install local database
        upgrade orchestration
 
@@ -83,14 +84,14 @@ def run_local_database_upgrade() -> tuple[bool, dict[str, Any] | None]:
         sys.path.insert(0, str(scripts_dir))
 
     try:
-        from database_migration import ensure_local_database_ready
+        from database_migration import ensure_local_database_ready_for_upgrade
     except Exception as exc:  # noqa: BLE001
         print("Failed to load local database migration helper.")
         print(f"Error: {exc}")
         return False, None
 
     try:
-        result = ensure_local_database_ready()
+        result = ensure_local_database_ready_for_upgrade()
     except Exception as exc:  # noqa: BLE001
         print("Local database upgrade check failed.")
         print(f"Error: {exc}")
@@ -112,6 +113,20 @@ def run_local_database_upgrade() -> tuple[bool, dict[str, Any] | None]:
         print(f"  after_version: {after_version}")
     if backup_path:
         print(f"  backup_path: {backup_path}")
+    listener_service = result.get("listener_service")
+    if isinstance(listener_service, dict):
+        print("  listener_service:")
+        for key in (
+            "was_running",
+            "stopped",
+            "restarted",
+            "error",
+            "status_error",
+            "stop_error",
+            "restart_error",
+        ):
+            if key in listener_service:
+                print(f"    {key}: {listener_service[key]}")
 
     return status in {"not_found", "not_needed", "ready", "migrated"}, result
 

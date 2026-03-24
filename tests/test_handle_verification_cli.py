@@ -26,6 +26,7 @@ import recover_handle as recover_cli  # noqa: E402
 import register_handle as register_cli  # noqa: E402
 import send_verification_code as verification_cli  # noqa: E402
 from utils.handle import EmailVerificationResult  # noqa: E402
+from utils.rpc import JsonRpcError  # noqa: E402
 
 
 class _AsyncClientContext:
@@ -104,7 +105,9 @@ def test_register_handle_main_requires_preissued_otp(
             register_cli.main()
 
     assert exc_info.value.code == 2
-    assert "send_verification_code.py" in capsys.readouterr().err
+    assert capsys.readouterr().err.strip() == (
+        "Error: OTP code is required for phone registration."
+    )
 
 
 
@@ -129,7 +132,71 @@ def test_recover_handle_main_requires_preissued_otp(
             recover_cli.main()
 
     assert exc_info.value.code == 2
-    assert "send_verification_code.py" in capsys.readouterr().err
+    assert capsys.readouterr().err.strip() == (
+        "Error: OTP code is required for handle recovery."
+    )
+
+
+def test_register_handle_main_renders_jsonrpc_error_without_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    """register_handle should print only the server-side reason on failure."""
+    monkeypatch.setattr(register_cli, "configure_logging", lambda **kwargs: None)
+
+    async def fake_do_register(**kwargs) -> bool:
+        del kwargs
+        raise JsonRpcError(-32004, "该邮箱已注册 3 个 Handle，配额上限为 3")
+
+    monkeypatch.setattr(register_cli, "do_register", fake_do_register)
+
+    with _ArgvContext(
+        [
+            "register_handle.py",
+            "--handle",
+            "alice",
+            "--email",
+            "user@example.com",
+        ]
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            register_cli.main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip() == "Error: 该邮箱已注册 3 个 Handle，配额上限为 3"
+    assert "Traceback" not in captured.err
+
+
+def test_send_verification_code_main_renders_jsonrpc_error_without_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    """send_verification_code should keep terminal errors concise."""
+    monkeypatch.setattr(verification_cli, "configure_logging", lambda **kwargs: None)
+
+    async def fake_do_send(phone: str) -> None:
+        del phone
+        raise JsonRpcError(-32010, "OTP sent too frequently")
+
+    monkeypatch.setattr(verification_cli, "do_send", fake_do_send)
+
+    with _ArgvContext(
+        [
+            "send_verification_code.py",
+            "--phone",
+            "+8613800138000",
+        ]
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            verification_cli.main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip() == "Error: OTP sent too frequently"
+    assert "Traceback" not in captured.err
 
 
 
@@ -221,7 +288,7 @@ def test_bind_contact_main_requires_explicit_phone_step(
             bind_cli.main()
 
     assert exc_info.value.code == 2
-    assert "--send-phone-otp" in capsys.readouterr().err
+    assert capsys.readouterr().err.strip() == "Error: OTP code is required for phone binding."
 
 
 

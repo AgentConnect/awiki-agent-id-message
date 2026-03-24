@@ -35,6 +35,7 @@ from credential_store import (
 )
 from e2ee_store import delete_e2ee_state
 from utils import SDKConfig, create_user_service_client, recover_handle
+from utils.cli_errors import exit_with_cli_error
 from utils.logging_config import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -141,10 +142,7 @@ async def do_recover(
     )
 
     if otp_code is None:
-        raise ValueError(
-            "OTP code is required. "
-            f"First run: uv run python scripts/send_verification_code.py --phone {phone}"
-        )
+        raise ValueError("OTP code is required for handle recovery.")
 
     async with create_user_service_client(config) as client:
         identity, recover_result = await recover_handle(
@@ -248,7 +246,19 @@ def main() -> None:
             )
         )
     except ValueError as exc:
-        parser.exit(status=2, message=f"Error: {exc}\n")
+        exit_with_cli_error(
+            exc=exc,
+            logger=logger,
+            context="recover_handle CLI validation failed",
+            exit_code=2,
+            log_traceback=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        exit_with_cli_error(
+            exc=exc,
+            logger=logger,
+            context="recover_handle CLI failed",
+        )
 
 
 if __name__ == "__main__":

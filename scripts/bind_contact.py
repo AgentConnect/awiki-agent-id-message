@@ -24,11 +24,9 @@ Usage:
 import argparse
 import asyncio
 import logging
-import sys
-
-import httpx
 
 from utils import SDKConfig, create_user_service_client
+from utils.cli_errors import exit_with_cli_error
 from utils.handle import (
     bind_email_send,
     bind_phone_send_otp,
@@ -58,18 +56,15 @@ async def do_bind(
     # Load existing identity (must have JWT)
     identity = load_identity(credential_name)
     if identity is None:
-        print(f"No credential found for '{credential_name}'. Register first.")
-        sys.exit(1)
+        raise ValueError(f"No credential found for '{credential_name}'. Register first.")
     jwt_token = identity.get("jwt_token")
     if not jwt_token:
-        print("No JWT token found. Please run check_status.py to refresh your identity first.")
-        sys.exit(1)
+        raise ValueError("No JWT token found. Refresh the identity first.")
 
     async with create_user_service_client(config) as client:
         if bind_email:
             if "@" not in bind_email:
-                print(f"Invalid email format: {bind_email} (must contain '@')")
-                sys.exit(1)
+                raise ValueError(f"Invalid email format: {bind_email}")
             return await _bind_email(
                 client,
                 bind_email,
@@ -101,20 +96,14 @@ async def _bind_email(
     poll_interval: float,
 ) -> bool:
     """Bind email to an existing account via a pure non-interactive flow."""
-    try:
-        verification_result = await ensure_email_verification(
-            client,
-            email,
-            send_fn=lambda: bind_email_send(client, email, jwt_token),
-            wait=wait_for_verification,
-            timeout=verification_timeout,
-            poll_interval=poll_interval,
-        )
-    except (httpx.HTTPStatusError, httpx.RequestError) as e:
-        print(f"Failed to send activation email: {e}")
-        sys.exit(1)
-    except ValueError as e:
-        raise ValueError(str(e)) from e
+    verification_result = await ensure_email_verification(
+        client,
+        email,
+        send_fn=lambda: bind_email_send(client, email, jwt_token),
+        wait=wait_for_verification,
+        timeout=verification_timeout,
+        poll_interval=poll_interval,
+    )
 
     if not verification_result.verified:
         if wait_for_verification:
@@ -144,35 +133,23 @@ async def _bind_phone(
 ) -> None:
     """Bind phone to an existing account via explicit non-interactive steps."""
     if send_phone_otp:
-        print(f"\nSending OTP to {phone}...")
-        try:
-            await bind_phone_send_otp(client, phone, jwt_token)
-            print("OTP sent.")
-            print(
-                "Next step  : rerun bind_contact.py with "
-                f"--bind-phone {phone} --otp-code <received_code>"
-            )
-        except (httpx.HTTPStatusError, httpx.RequestError) as e:
-            print(f"Failed to send OTP: {e}")
-            sys.exit(1)
+        logger.info("Sending phone bind OTP phone=%s", phone)
+        await bind_phone_send_otp(client, phone, jwt_token)
+        print("OTP sent.")
+        print(
+            "Next step  : rerun bind_contact.py with "
+            f"--bind-phone {phone} --otp-code <received_code>"
+        )
         return
 
     if otp_code is None:
-        raise ValueError(
-            "OTP code is required for --bind-phone. "
-            f"First run: uv run python scripts/bind_contact.py --bind-phone {phone} --send-phone-otp"
-        )
+        raise ValueError("OTP code is required for phone binding.")
 
-    try:
-        result = await bind_phone_verify(client, phone, otp_code, jwt_token)
-        if result.get("success"):
-            print(f"Phone {result.get('phone', phone)} bound successfully.")
-        else:
-            print("Binding failed.")
-            sys.exit(1)
-    except (httpx.HTTPStatusError, httpx.RequestError) as e:
-        print(f"Binding failed: {e}")
-        sys.exit(1)
+    result = await bind_phone_verify(client, phone, otp_code, jwt_token)
+    if result.get("success"):
+        print(f"Phone {result.get('phone', phone)} bound successfully.")
+        return
+    raise RuntimeError("Binding failed.")
 
 
 def main() -> None:
@@ -250,7 +227,19 @@ def main() -> None:
         if not completed:
             raise SystemExit(PENDING_VERIFICATION_EXIT_CODE)
     except ValueError as exc:
-        parser.exit(status=2, message=f"Error: {exc}\n")
+        exit_with_cli_error(
+            exc=exc,
+            logger=logger,
+            context="bind_contact CLI validation failed",
+            exit_code=2,
+            log_traceback=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        exit_with_cli_error(
+            exc=exc,
+            logger=logger,
+            context="bind_contact CLI failed",
+        )
 
 
 if __name__ == "__main__":

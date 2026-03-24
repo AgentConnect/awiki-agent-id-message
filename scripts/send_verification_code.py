@@ -20,6 +20,7 @@ import asyncio
 import logging
 
 from utils import SDKConfig, create_user_service_client, send_otp
+from utils.cli_errors import exit_with_cli_error
 from utils.logging_config import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,14 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    asyncio.run(do_send(args.phone))
+    try:
+        asyncio.run(do_send(args.phone))
+    except Exception as exc:  # noqa: BLE001
+        exit_with_cli_error(
+            exc=exc,
+            logger=logger,
+            context="send_verification_code CLI failed",
+        )
 
 
 if __name__ == "__main__":
