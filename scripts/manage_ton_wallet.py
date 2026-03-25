@@ -20,13 +20,14 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from credential_layout import resolve_credential_paths
-from utils.logging_config import configure_logging
-from ton_wallet import (
-    TonWallet,
-    NetworkType,
-    WalletError,
-    NetworkError,
+from utils import (
+    SDKConfig,
+    authenticated_rpc_call,
+    create_user_service_client,
 )
+from utils.logging_config import configure_logging
+from ton_wallet import TonWallet, NetworkType, WalletError, NetworkError
+from credential_store import create_authenticator, load_identity
 
 
 def _resolve_storage_dir(credential_name: str) -> Path:
@@ -244,6 +245,56 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+async def _sync_wallet_to_backend(credential_name: str, ton_wallet_address: str) -> None:
+    """Best-effort sync of TON wallet address to user-service Handle record.
+
+    This helper is intentionally lenient: failures are logged to stderr but do not
+    abort the CLI operation.
+    """
+    # Load local identity to discover handle and JWT
+    identity = load_identity(credential_name)
+    handle = identity.get("handle") if identity else None
+    if not handle:
+        print(
+            f"[ton-wallet] Skipping backend sync: credential '{credential_name}' has no handle.",
+            file=sys.stderr,
+        )
+        return
+
+    config = SDKConfig()
+    auth_result = create_authenticator(credential_name, config)
+    if auth_result is None:
+        print(
+            f"[ton-wallet] Skipping backend sync: authenticator unavailable for credential '{credential_name}'.",
+            file=sys.stderr,
+        )
+        return
+
+    auth, _ = auth_result
+    async with create_user_service_client(config) as client:
+        try:
+            await authenticated_rpc_call(
+                client,
+                "/user-service/handle/rpc",
+                "update_wallet",
+                {
+                    "handle": handle,
+                    "ton_wallet_address": ton_wallet_address,
+                },
+                auth=auth,
+                credential_name=credential_name,
+            )
+            print(
+                f"[ton-wallet] Synced TON wallet address to backend for handle '{handle}'.",
+                file=sys.stderr,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"[ton-wallet] Warning: failed to sync wallet address to backend: {e}",
+                file=sys.stderr,
+            )
+
+
 async def _run(args: argparse.Namespace) -> None:
     if args.create:
         if not args.password:
@@ -256,6 +307,10 @@ async def _run(args: argparse.Namespace) -> None:
         )
         info = wallet.get_wallet_info()
         await wallet.close()
+        # Sync bounceable address to backend if available
+        address_bounceable = info.get("address_bounceable")
+        if address_bounceable:
+            await _sync_wallet_to_backend(args.credential, address_bounceable)
         result: dict[str, Any] = {
             "credential": args.credential,
             "mnemonic": mnemonics,
@@ -294,6 +349,9 @@ async def _run(args: argparse.Namespace) -> None:
             wallet_version=args.wallet_version,
         )
         await wallet.close()
+        address = info.get("address")
+        if address:
+            await _sync_wallet_to_backend(args.credential, address)
         result = {
             "credential": args.credential,
             "address": info.get("address"),
@@ -462,4 +520,3 @@ def main(argv: Optional[List[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
-

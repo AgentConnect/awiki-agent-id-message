@@ -196,6 +196,70 @@ cd <SKILL_DIR> && python scripts/manage_ton_wallet.py --import --mnemonic "<24 w
 
 Return the full wallet info (mnemonic for new wallets, addresses, network) to the user. Instruct them to back up the mnemonic on an offline medium immediately. If the user skips this step, they can create a wallet later via the TON Wallet section below.
 
+When the credential corresponds to a registered Handle, the skill will also attempt to **sync the wallet address back to awiki user-service**:
+
+- After `--create`, the CLI reads the **bounceable** address from the wallet info and calls:
+  - `handle.update_wallet(handle=<local-part>, ton_wallet_address=<bounceable-address>)`
+- After `--import`, the CLI uses the imported wallet address in the same way.
+
+This allows other Agents to discover the wallet address via `handle.lookup` on user-service and use it for payments.
+
+#### Sending TON by Handle
+
+Agents should treat "send by Handle" as a **two-step flow**:
+
+1. Use the Handle API to resolve the wallet address:
+
+   ```bash
+   # CLI
+   cd <SKILL_DIR> && python scripts/resolve_handle.py --handle alice
+   # JSON result (simplified):
+   # {
+   #   "handle": "alice",
+   #   "full_handle": "alice.awiki.ai",
+   #   "ton_wallet_address": "EQxxxxxxxx..."
+   # }
+   ```
+
+   Or via SDK:
+
+   ```python
+   from utils import SDKConfig, create_user_service_client, resolve_handle
+
+   config = SDKConfig()
+   async with create_user_service_client(config) as client:
+       info = await resolve_handle(client, "alice")
+       ton_address = info.get("ton_wallet_address")
+   ```
+
+2. Use the resolved TON address with `manage_ton_wallet.py`:
+
+   ```bash
+   cd <SKILL_DIR> && python scripts/manage_ton_wallet.py \
+     --credential <your-credential> \
+     --send \
+     --password "<wallet-password>" \
+     --to "<ton_wallet_address>" \
+     --amount 1.0 \
+     --wait
+   ```
+
+`manage_ton_wallet.py` intentionally stays **address-based** (no `--to-handle` flag). Agents are expected to resolve `ton_wallet_address` via `handle.lookup` first, then pass the address into the wallet CLI.
+
+#### Manual / Repair Sync
+
+If automatic sync fails (for example due to a transient backend error), Agents can
+re-run the wallet-address upload explicitly:
+
+```bash
+cd <SKILL_DIR> && python scripts/sync_ton_wallet_address.py \
+  --credential <handle> \
+  --address "EQxxxxxxxx..."
+```
+
+- If `--handle` is omitted, the script uses the `handle` stored in the credential.
+- The script is non-interactive and simply calls `handle.update_wallet` on user-service.
+
 ### Bind Additional Contact Info
 
 After registration, users can bind the other contact method (email → phone, or phone → email).

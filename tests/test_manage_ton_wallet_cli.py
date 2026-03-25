@@ -169,6 +169,112 @@ def test_create_uses_per_credential_storage_and_mainnet(
     assert out["network"] in ("mainnet", "testnet")
 
 
+def test_create_syncs_wallet_address_to_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--create should attempt to sync bounceable address to backend."""
+
+    tmp_root = Path("/tmp/awiki-test-cred-sync-create")
+    fake_paths = _FakePaths(credential_dir=tmp_root)
+
+    monkeypatch.setattr(ton_cli, "configure_logging", lambda **kwargs: None)
+    monkeypatch.setattr(ton_cli, "resolve_credential_paths", lambda name: fake_paths)
+
+    # Avoid hitting real network / config
+    class _FakeConfig:
+        def __init__(self) -> None:
+            self.user_service_url = "https://example.com"
+
+    class _DummyClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, Any, dict[str, Any]]] = []
+
+        async def post(self, endpoint: str, json: dict, headers: dict | None = None):
+            class _Resp:
+                def __init__(self) -> None:
+                    self.status_code = 200
+
+                def raise_for_status(self) -> None:
+                    return None
+
+                def json(self) -> dict[str, Any]:
+                    return {"result": {"ok": True}}
+
+                @property
+                def headers(self) -> dict[str, str]:
+                    return {}
+
+            self.calls.append((endpoint, json, headers or {}))
+            return _Resp()
+
+        async def __aenter__(self) -> "_DummyClient":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    fake_client = _DummyClient()
+
+    # Patch SDKConfig, create_user_service_client, create_authenticator, load_identity
+    monkeypatch.setattr(ton_cli, "SDKConfig", _FakeConfig)
+    monkeypatch.setattr(ton_cli, "create_user_service_client", lambda cfg: fake_client)
+
+    class _Auth:
+        def get_auth_header(self, server_url: str, force_new: bool = False) -> dict[str, str]:
+            return {"Authorization": "Bearer test"}
+
+        def clear_token(self, server_url: str) -> None:
+            return None
+
+        def update_token(self, server_url: str, headers: dict[str, str]) -> str | None:
+            return None
+
+    monkeypatch.setattr(
+        ton_cli,
+        "create_authenticator",
+        lambda name, config: (_Auth(), {"did": "did:wba:awiki.ai:user:alice"}),
+    )
+    monkeypatch.setattr(
+        ton_cli,
+        "load_identity",
+        lambda name="default": {"did": "did:wba:awiki.ai:user:alice", "handle": "alice"},
+    )
+
+    created_wallet: dict[str, Any] = {}
+
+    def _fake_wallet_ctor(network=None, api_endpoint=None, storage_dir=None):
+        wallet = _DummyWallet(network=network, api_endpoint=api_endpoint, storage_dir=storage_dir)
+        created_wallet["instance"] = wallet
+        return wallet
+
+    monkeypatch.setattr(ton_cli, "TonWallet", _fake_wallet_ctor)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "manage_ton_wallet.py",
+            "--credential",
+            "alice",
+            "--create",
+            "--password",
+            "Strong_Passw0rd!",
+        ],
+    )
+
+    ton_cli.main()
+    _ = capsys.readouterr().out
+
+    # Verify that update_wallet was called via JSON-RPC
+    assert fake_client.calls, "expected at least one backend call"
+    endpoint, payload, _headers = fake_client.calls[0]
+    assert endpoint == "/user-service/handle/rpc"
+    assert payload["method"] == "update_wallet"
+    assert payload["params"]["handle"] == "alice"
+    assert payload["params"]["ton_wallet_address"] == "EQ_dummy"
+
+
 def test_info_offline_reports_no_wallet_when_missing(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
