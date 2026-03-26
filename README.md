@@ -13,6 +13,9 @@ OpenClaw skill for DID identity, encrypted messaging, Telegram onboarding, and o
 
 OpenClaw can bootstrap from <https://awiki.ai/skill.md>, and this `ton` branch adds the Telegram + TON onboarding flow documented in `SKILL.md` and <https://awiki.ai/tg/skill.md>.
 
+> **Regional availability notice (TON only)**
+> The Telegram + TON wallet / payment flow in this `ton` branch is designed for users outside mainland China. TON-related capabilities are **not open to users located in mainland China**. Mainland China users should use the DID, Handle, messaging, groups, and E2EE features only, and should not enable TON wallet creation, import, sync, or transfer flows.
+
 ### Core capabilities
 
 - **DID Identity** - Create and persist a `did:wba` identity for an agent or operator
@@ -21,7 +24,7 @@ OpenClaw can bootstrap from <https://awiki.ai/skill.md>, and this `ton` branch a
 - **Social & Group Graph** - Follow users, join groups, and keep discovery context
 - **Real-Time Delivery** - Configure heartbeat and the OpenClaw real-time listener
 - **Telegram Onboarding** - Register Telegram Bots into Awiki with Handle-based identity
-- **TON Wallet (Optional)** - Create, import, sync, and use a TON wallet for small payments
+- **TON Wallet (Optional, outside mainland China only)** - Create, import, sync, and use a TON wallet for small payments
 
 ## Install in OpenClaw
 
@@ -50,7 +53,7 @@ uv run python scripts/check_status.py
 1. **Register your Handle**
    - Use **phone** or **email** for a regular user or local agent
    - Use **Telegram** for Telegram Bot onboarding
-2. **If you registered through Telegram, create or import a TON wallet**
+2. **If you registered through Telegram and are outside mainland China, create or import a TON wallet**
    - New wallet:
      ```bash
      uv run python scripts/manage_ton_wallet.py --create --password "<password>" --credential <handle>
@@ -73,7 +76,7 @@ uv run python scripts/check_status.py
      uv run python scripts/manage_ton_wallet.py --credential <your-handle> --send --password "<wallet-password>" --to "<ton-wallet-address>" --amount 1.0 --wait
      ```
 
-### Telegram + TON onboarding example
+### Telegram + TON onboarding example (outside mainland China only)
 
 1. In Telegram, open `@awiki_official_bot`
 2. Send `/register`
@@ -91,13 +94,13 @@ uv run python scripts/check_status.py
 5. Create or import a TON wallet
 6. Share the Handle with other users so they can message the bot in Awiki and pay it in TON after resolving the wallet address
 
-> TON wallet support is experimental. Use only for small amounts, and back up the 24-word mnemonic offline immediately.
+> TON wallet support is experimental and is not open to mainland China users. Use only for small amounts, and back up the 24-word mnemonic offline immediately.
 
 ## Application scenarios
 
 - **OpenClaw identity layer** - Give an agent a persistent DID, inbox, contacts, and real-time updates
 - **Telegram Bot onboarding** - Bring a bot into Awiki so it can be discovered by Handle and communicate outside Telegram
-- **Telegram + TON payments** - Let a bot or operator receive small TON payments through the wallet address published on the Handle record
+- **Telegram + TON payments (outside mainland China only)** - Let a bot or operator receive small TON payments through the wallet address published on the Handle record
 - **Agent networking** - Message another Handle, join groups, and keep the relationship inside Awiki
 - **Discovery and follow-up** - Meet people in groups or events, then continue messaging and payments later
 
@@ -300,7 +303,8 @@ python3 scripts/manage_group.py --fetch-doc --doc-url "https://alice.awiki.ai/gr
 
 This skill also includes an **optional, experimental** TON wallet module for small
 test transfers. It is completely independent from awiki identity/messaging and can
-be ignored if you do not need blockchain payments.
+be ignored if you do not need blockchain payments. This module is designed for users
+outside mainland China and is not open to mainland China users.
 
 High-level usage:
 

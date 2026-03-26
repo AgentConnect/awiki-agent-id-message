@@ -716,6 +716,7 @@ This skill ships with an **optional, experimental** integration for managing a T
 and sending TON payments. It is completely independent from awiki identity, messaging,
 groups, and E2EE. You can ignore this module entirely if you do not need blockchain
 payments — all core awiki functionality works without it.
+TON-related functionality is designed for users outside mainland China only and is not open to mainland China users.
 
 > **Experimental warning**
 > The TON wallet module is experimental and may have bugs or behavioral changes in
