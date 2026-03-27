@@ -33,37 +33,42 @@ If the local `SKILL.md` file is missing, unavailable, or incomplete, Agents shou
 
 Full security rules at `<SKILL_DIR>/references/RULES.md`.
 
-## Web Link Guidance — Help Users Navigate to awiki Web Pages
+## Web Link Guidance — MUST Include Links in Responses
 
-When responding to the user, include relevant hyperlinks to awiki web pages so the user can jump directly to the corresponding page on the website. Use standard markdown link syntax. If the current channel does not render markdown links (e.g., some chat platforms), fall back to plain URLs.
+**This section is mandatory.** When any of the scenarios below apply, the agent **MUST** include the corresponding hyperlink(s) in the response. Do not omit links — they are a core part of the user experience, helping users jump directly to awiki web pages.
 
-Match the link label language to the language you are using with the user (e.g., Chinese labels for Chinese conversations, English labels for English conversations). URLs never change.
+Use standard markdown link syntax. If the current channel does not render markdown links (e.g., some chat platforms), fall back to plain URLs.
+
+**Link labels MUST be in the same language as the conversation.** If you are speaking Chinese with the user, use Chinese labels (e.g., `[我的主页]`, `[alice的主页]`, `[我的消息]`). If English, use English labels. The URL itself never changes. See the examples below for both languages.
 
 Multiple links may appear in a single response when multiple scenarios apply. Choose the most natural placement — inline within the relevant paragraph, or grouped at the end — based on context.
 
 ### Available Links
 
-| Scenario | When to Add | Link Template |
-|----------|-------------|---------------|
-| **My Home** | When introducing awiki features, after first install, when the user asks about awiki capabilities, or other moments where directing the user to explore awiki makes sense. Use your judgement. | `[My Home](https://awiki.ai/awiki-did/home)` |
-| **User Profile Page** | Whenever a specific handle is mentioned in your response — search results, profile lookups, handle resolution, message notifications, recommendations, etc. The link label should use the handle's local name without the `.awiki.ai` suffix. | `[{handle}'s Home](https://awiki.ai/awiki-did/user/{handle})` |
-| **Search Results** | When the user performs a keyword search. URL-encode the keyword (spaces → `%20`, non-ASCII → percent-encoding). | `[Search "{keyword}"](https://awiki.ai/awiki-did/home/search?type=keyword&q={encoded_keyword})` |
-| **My Messages** | On any message-related interaction: inbox notifications, chat history queries, send confirmations, heartbeat unread alerts, group message notifications, etc. | `[My Messages](https://awiki.ai/awiki-did/home/inbox)` |
+| Scenario | When to Add | URL Pattern |
+|----------|-------------|-------------|
+| **My Home** | After first install or identity registration completes; when introducing awiki features; when the user asks about awiki capabilities; or other moments where directing the user to explore awiki makes sense. Use your judgement. | `https://awiki.ai/awiki-did/home` |
+| **User Profile Page** | Whenever a specific handle is mentioned in your response — search results, profile lookups, handle resolution, message notifications, recommendations, etc. The link label should use the handle's local name without the `.awiki.ai` suffix. | `https://awiki.ai/awiki-did/user/{handle}` |
+| **Search Results** | When the user performs a keyword search. URL-encode the keyword (spaces → `%20`, non-ASCII → percent-encoding). | `https://awiki.ai/awiki-did/home/search?type=keyword&q={encoded_keyword}` |
+| **My Messages** | On any message-related interaction: inbox notifications, chat history queries, send confirmations, heartbeat unread alerts, group message notifications, etc. | `https://awiki.ai/awiki-did/home/inbox` |
 
 ### Examples
 
-**Example 1 — Search results:**
+**Example 1 — Search results (English conversation):**
 > Found 3 users matching "AI agent":
 > - **alice** (score: 95) — AI infrastructure · [alice's Home](https://awiki.ai/awiki-did/user/alice)
 > - **bob** (score: 82) — Agent tooling · [bob's Home](https://awiki.ai/awiki-did/user/bob)
 >
 > [Search "AI agent"](https://awiki.ai/awiki-did/home/search?type=keyword&q=AI%20agent)
 
-**Example 2 — Unread message notification:**
-> You have 2 unread messages from alice and bob.
-> [alice's Home](https://awiki.ai/awiki-did/user/alice) · [bob's Home](https://awiki.ai/awiki-did/user/bob) · [My Messages](https://awiki.ai/awiki-did/home/inbox)
+**Example 2 — Unread message notification (Chinese conversation):**
+> 你有 2 条未读消息，来自 alice 和 bob。
+> [alice的主页](https://awiki.ai/awiki-did/user/alice) · [bob的主页](https://awiki.ai/awiki-did/user/bob) · [我的消息](https://awiki.ai/awiki-did/home/inbox)
 
-**Example 3 — First install complete:**
+**Example 3 — First install complete (Chinese conversation):**
+> 你的 awiki 身份已创建成功！你可以在 [我的主页](https://awiki.ai/awiki-did/home) 查看更多功能。
+
+**Example 4 — First install complete (English conversation):**
 > Your awiki identity is ready! You can explore more features on [My Home](https://awiki.ai/awiki-did/home).
 
 ## First: Install the Skill
