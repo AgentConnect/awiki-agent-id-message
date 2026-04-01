@@ -72,7 +72,7 @@ from e2ee_handler import E2eeHandler
 from listener_config import ROUTING_MODES, ListenerConfig
 from message_daemon import LocalMessageDaemon, load_local_daemon_settings
 from message_transport import is_websocket_mode
-from utils.config import SDKConfig
+from utils.config import SDKConfig, resolve_openclaw_gateway_port
 from utils.identity import DIDIdentity
 from utils.logging_config import configure_logging
 from utils.ws import WsClient
@@ -150,40 +150,118 @@ class _CredentialWsSupervisor:
         self._config = config
         self._rpc_proxy = _ActiveWsRpcProxy(config=config)
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        # Map any credential alias (e.g. "default") to its canonical credential
+        # name for one DID. This ensures that we only maintain one WebSocket
+        # session per DID even when multiple credential names point to the same
+        # identity.
+        self._alias_map: dict[str, str] = {}
 
     @property
     def rpc_proxy(self) -> _ActiveWsRpcProxy:
         """Return the shared RPC proxy used by the local daemon."""
         return self._rpc_proxy
 
+    # --- Credential alias resolution ----------------------------------------
+
+    @staticmethod
+    def _select_canonical_name(
+        names: list[str],
+        primary_credential: str,
+    ) -> str:
+        """Pick one canonical credential name for a DID.
+
+        Preference order:
+          1) The explicitly requested primary credential name when present.
+          2) A non-"default" credential name in sorted order.
+          3) Fallback to the lexicographically smallest name.
+        """
+        if primary_credential in names:
+            return primary_credential
+        non_default = sorted(name for name in names if name != "default")
+        if non_default:
+            return non_default[0]
+        return sorted(names)[0]
+
+    def _rebuild_alias_map(
+        self,
+        primary_credential: str,
+        identities: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
+        """Recompute the credential alias -> canonical name map based on DIDs.
+
+        Multiple credential names are allowed to share the same DID and
+        credential directory. For WebSocket sessions we want at most one active
+        connection per DID. This method groups credentials by DID and picks
+        one canonical name per DID, then records aliases for all names in the
+        group so RPC calls using any alias are routed to the same WsClient.
+        """
+        if identities is None:
+            try:
+                identities = list_identities_by_name()
+            except Exception:  # noqa: BLE001
+                logger.debug("Failed to load credential index for alias map", exc_info=True)
+                identities = {}
+
+        did_to_names: dict[str, list[str]] = {}
+        for credential_name, entry in identities.items():
+            did = entry.get("did")
+            if not isinstance(did, str) or not did:
+                continue
+            did_to_names.setdefault(did, []).append(credential_name)
+
+        alias_map: dict[str, str] = {}
+        for did, names in did_to_names.items():
+            del did
+            canonical = self._select_canonical_name(names, primary_credential)
+            for name in names:
+                alias_map[name] = canonical
+
+        # Ensure the primary credential itself is always present, even when it
+        # is not yet indexed (for example, before the first save_identity call).
+        alias_map.setdefault(primary_credential, primary_credential)
+        self._alias_map = alias_map
+
+    def _resolve_alias(self, credential_name: str) -> str:
+        """Return the canonical credential name for one alias."""
+        return self._alias_map.get(credential_name, credential_name)
+
     async def ensure_started(self, credential_name: str) -> None:
         """Start one credential listen loop if it is not already running."""
-        self._rpc_proxy.ensure_credential(credential_name)
-        existing = self._tasks.get(credential_name)
+        canonical = self._resolve_alias(credential_name)
+        self._rpc_proxy.ensure_credential(canonical)
+        existing = self._tasks.get(canonical)
         if existing is not None and not existing.done():
             return
         task = asyncio.create_task(
             listen_loop(
-                credential_name,
+                canonical,
                 self._cfg,
                 config=self._config,
                 rpc_proxy=self._rpc_proxy,
             ),
-            name=f"ws_listener[{credential_name}]",
+            name=f"ws_listener[{canonical}]",
         )
-        self._tasks[credential_name] = task
+        self._tasks[canonical] = task
 
     async def ensure_all_started(self, credential_names: list[str]) -> None:
         """Start background listen loops for all known credentials."""
+        primary = credential_names[0] if credential_names else "default"
+        self._rebuild_alias_map(primary)
+        seen: set[str] = set()
         for credential_name in credential_names:
-            await self.ensure_started(credential_name)
+            canonical = self._resolve_alias(credential_name)
+            if canonical in seen:
+                continue
+            await self.ensure_started(canonical)
+            seen.add(canonical)
 
     async def sync_known_credentials(
         self,
         primary_credential: str,
     ) -> list[str]:
         """Start any newly discovered credentials from the indexed store."""
-        known_credentials = list(list_identities_by_name().keys())
+        identities = list_identities_by_name()
+        known_credentials = list(identities.keys())
         if primary_credential not in known_credentials:
             known_credentials.insert(0, primary_credential)
         else:
@@ -191,18 +269,29 @@ class _CredentialWsSupervisor:
                 name for name in known_credentials if name != primary_credential
             ]
 
+        # Rebuild the alias map so we only start one listen loop per DID. Use
+        # the identities snapshot we already loaded to avoid re-reading from
+        # disk and to keep test doubles predictable.
+        self._rebuild_alias_map(primary_credential, identities=identities)
+
         started_credentials: list[str] = []
+        seen_canonical: set[str] = set()
         for credential_name in known_credentials:
-            existing = self._tasks.get(credential_name)
+            canonical = self._resolve_alias(credential_name)
+            if canonical in seen_canonical:
+                continue
+            existing = self._tasks.get(canonical)
             if existing is not None and not existing.done():
                 continue
-            await self.ensure_started(credential_name)
-            started_credentials.append(credential_name)
+            await self.ensure_started(canonical)
+            started_credentials.append(canonical)
+            seen_canonical.add(canonical)
         return started_credentials
 
     def get_task(self, credential_name: str) -> asyncio.Task[None] | None:
         """Return the current background task for one credential, if any."""
-        return self._tasks.get(credential_name)
+        canonical = self._resolve_alias(credential_name)
+        return self._tasks.get(canonical)
 
     async def call(
         self,
@@ -211,8 +300,9 @@ class _CredentialWsSupervisor:
         credential_name: str,
     ) -> dict[str, Any]:
         """Ensure the credential session exists, then proxy the RPC call."""
-        await self.ensure_started(credential_name)
-        return await self._rpc_proxy.call(method, params, credential_name)
+        canonical = self._resolve_alias(credential_name)
+        await self.ensure_started(canonical)
+        return await self._rpc_proxy.call(method, params, canonical)
 
     async def close(self) -> None:
         """Cancel all running credential listen loops."""
@@ -889,6 +979,24 @@ async def _forward(
     msg_seq: int = 0,
 ) -> bool:
     """Forward a message to OpenClaw via HTTP ``/hooks/agent``."""
+    # Resolve the effective OpenClaw Gateway port for localhost URLs at call
+    # time so changes to openclaw.json or environment variables take effect
+    # without restarting the listener. For non-localhost URLs we preserve the
+    # configured URL unchanged.
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        if host in ("127.0.0.1", "localhost"):
+            base_port = parsed.port or 18789
+            gw_port = resolve_openclaw_gateway_port(default=base_port)
+            netloc = f"{host}:{gw_port}"
+            url = urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+    except Exception:
+        # Best-effort URL normalization; fall back to the original URL on error.
+        logger.debug("Failed to normalize gateway URL; using configured value", exc_info=True)
+
     e2ee_tag = "[E2EE] " if params.get("_e2ee") else ""
     sender = _truncate_did(params.get("sender_did", "unknown"))
     text = _build_event_text(params, route, cfg)
@@ -1173,6 +1281,35 @@ async def listen_loop(
                             "[#%d] Received: type=%s sender=%s content=%s",
                             msg_seq, msg_type, _truncate_did(sender_did), content_preview,
                         )
+
+                        # Idempotency guard: skip messages already stored for this owner DID.
+                        # This protects against duplicate pushes when multiple credential
+                        # aliases share the same DID or when the server replays the same
+                        # msg_id. We check before E2EE handling and routing so downstream
+                        # logic only sees each logical message once.
+                        if incoming_msg_id:
+                            try:
+                                existing = local_store.get_message_by_id(
+                                    local_db,
+                                    msg_id=incoming_msg_id,
+                                    owner_did=my_did,
+                                )
+                            except Exception:
+                                existing = None
+                            if existing is not None:
+                                logger.info(
+                                    "[#%d] Duplicate msg_id=%s for owner=%s, skipping",
+                                    msg_seq,
+                                    incoming_msg_id,
+                                    _truncate_did(my_did),
+                                )
+                                await _mark_message_read(
+                                    ws,
+                                    my_did,
+                                    incoming_msg_id,
+                                    credential_name=credential_name,
+                                )
+                                continue
 
                         # E2EE message interception (before classify_message)
                         if (e2ee_handler is not None

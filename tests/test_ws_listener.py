@@ -728,6 +728,13 @@ def test_listen_loop_keeps_message_unread_when_forward_fails(
     monkeypatch.setattr(ws_listener, "is_websocket_mode", lambda config: True)
     monkeypatch.setattr(ws_listener.local_store, "get_connection", lambda: _FakeDb())
     monkeypatch.setattr(ws_listener.local_store, "ensure_schema", lambda conn: None)
+    # New idempotency guard consults get_message_by_id; ensure it returns no
+    # existing record so the live path is exercised.
+    monkeypatch.setattr(
+        ws_listener.local_store,
+        "get_message_by_id",
+        lambda *args, **kwargs: None,
+    )
     monkeypatch.setattr(
         ws_listener.local_store,
         "store_message",
@@ -764,6 +771,166 @@ def test_listen_loop_keeps_message_unread_when_forward_fails(
 
     assert stored_messages == ["msg-live-fail"]
     assert mark_read_calls == []
+
+
+def test_listen_loop_skips_duplicate_message_by_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Live WebSocket delivery should skip already stored msg_id for the same DID."""
+    config = _build_config(tmp_path)
+    mark_read_calls: list[tuple[str, str | None, str]] = []
+    stored_messages: list[str] = []
+    forward_calls: list[str] = []
+
+    class _FakeE2eeHandler:
+        """Minimal E2EE handler stub for plaintext duplicate tests."""
+
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+            self.is_ready = False
+
+        async def initialize(self, my_did: str) -> bool:
+            del my_did
+            return False
+
+        async def force_save_state(self) -> None:
+            return None
+
+    class _FakeDb:
+        """Minimal local DB stub."""
+
+        def close(self) -> None:
+            return None
+
+    class _FakeRuntimeWsClient:
+        """WsClient stub that yields one notification and then stops the loop."""
+
+        def __init__(self, config: SDKConfig, identity: Any) -> None:
+            del config, identity
+            self._notifications = [
+                {
+                    "method": "new_message",
+                    "params": {
+                        "id": "msg-dup",
+                        "type": "text",
+                        "sender_did": "did:bob",
+                        "content": "hello dup",
+                    },
+                }
+            ]
+
+        async def __aenter__(self) -> "_FakeRuntimeWsClient":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            del exc_type, exc, tb
+            return None
+
+        async def receive_notification(self, timeout: float = 5.0) -> dict[str, Any] | None:
+            del timeout
+            if self._notifications:
+                return self._notifications.pop(0)
+            raise asyncio.CancelledError()
+
+        async def ping(self) -> bool:
+            return True
+
+        async def send_pong(self) -> None:
+            return None
+
+    async def _fake_forward(*args, **kwargs) -> bool:
+        del args, kwargs
+        forward_calls.append("called")
+        return True
+
+    async def _fake_mark_message_read(
+        ws: Any,
+        my_did: str,
+        message_id: str | None,
+        *,
+        credential_name: str,
+    ) -> None:
+        del ws
+        mark_read_calls.append((my_did, message_id, credential_name))
+
+    async def _fake_refresh_channels(*args, **kwargs) -> tuple[list[tuple[str, str]], str, float | None]:
+        del args, kwargs
+        return [], "empty", None
+
+    async def _fake_catch_up(*args, **kwargs) -> None:
+        del args, kwargs
+
+    monkeypatch.setattr(ws_listener, "E2eeHandler", _FakeE2eeHandler)
+    monkeypatch.setattr(
+        ws_listener,
+        "load_identity",
+        lambda credential_name: {
+            "did": "did:alice",
+            "jwt_token": "jwt-token",
+            "private_key_pem": b"private",
+            "public_key_pem": b"public",
+        },
+    )
+    monkeypatch.setattr(
+        ws_listener,
+        "_build_identity",
+        lambda cred_data: SimpleNamespace(did=cred_data["did"], jwt_token=cred_data["jwt_token"]),
+    )
+    monkeypatch.setattr(ws_listener, "WsClient", _FakeRuntimeWsClient)
+    monkeypatch.setattr(ws_listener, "_refresh_external_channels", _fake_refresh_channels)
+    monkeypatch.setattr(ws_listener, "_catch_up_inbox", _fake_catch_up)
+    monkeypatch.setattr(ws_listener, "_forward", _fake_forward)
+    monkeypatch.setattr(ws_listener, "_mark_message_read", _fake_mark_message_read)
+    monkeypatch.setattr(ws_listener, "classify_message", lambda params, my_did, cfg: "wake")
+    monkeypatch.setattr(ws_listener, "is_websocket_mode", lambda config: True)
+    monkeypatch.setattr(ws_listener.local_store, "get_connection", lambda: _FakeDb())
+    monkeypatch.setattr(ws_listener.local_store, "ensure_schema", lambda conn: None)
+
+    # Simulate that the message with msg_id="msg-dup" is already present for this owner DID.
+    monkeypatch.setattr(
+        ws_listener.local_store,
+        "get_message_by_id",
+        lambda conn, *, msg_id, owner_did, credential_name=None: {"msg_id": msg_id, "owner_did": owner_did},
+    )
+    monkeypatch.setattr(
+        ws_listener.local_store,
+        "store_message",
+        lambda conn, **kwargs: stored_messages.append(kwargs["msg_id"]),
+    )
+    monkeypatch.setattr(ws_listener.local_store, "upsert_contact", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ws_listener.local_store, "upsert_group", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        ws_listener.local_store,
+        "sync_group_member_from_system_event",
+        lambda *args, **kwargs: None,
+    )
+
+    cfg = SimpleNamespace(
+        reconnect_base_delay=1.0,
+        reconnect_max_delay=5.0,
+        e2ee_save_interval=30.0,
+        e2ee_decrypt_fail_action="drop",
+        mode="smart",
+        heartbeat_interval=60.0,
+        agent_webhook_url="http://127.0.0.1/hooks/agent",
+        wake_webhook_url="http://127.0.0.1/hooks/wake",
+        webhook_token="token",
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            ws_listener.listen_loop(
+                credential_name="default",
+                cfg=cfg,
+                config=config,
+            )
+        )
+
+    # Duplicate message should not be stored or forwarded, only marked read once.
+    assert stored_messages == []
+    assert forward_calls == []
+    assert mark_read_calls == [("did:alice", "msg-dup", "default")]
 
 
 def test_forward_counts_successful_http_hook_as_delivery(
@@ -851,3 +1018,47 @@ def test_forward_counts_successful_http_hook_as_delivery(
             },
         }
     ]
+
+
+def test_forward_uses_dynamic_gateway_port_for_localhost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_forward should resolve the current OpenClaw gateway port for localhost URLs."""
+
+    class _FakeHttp:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]):
+            self.calls.append({"url": url, "json": json, "headers": headers})
+            return SimpleNamespace(is_success=True, status_code=200, text="ok")
+
+    # Force a custom gateway port at call time.
+    monkeypatch.setattr(
+        ws_listener,
+        "resolve_openclaw_gateway_port",
+        lambda default=18789: 25307,
+    )
+
+    http = _FakeHttp()
+    result = asyncio.run(
+        ws_listener._forward(
+            http=http,
+            url="http://127.0.0.1:18789/hooks/agent",
+            token="token-123",
+            params={
+                "sender_handle": "zhuocheng",
+                "sender_did": "did:wba:awiki.ai:user:k1_sender",
+                "content": "hello",
+            },
+            route="wake",
+            cfg=SimpleNamespace(agent_hook_name="IM"),
+            my_did="did:wba:awiki.ai:user:k1_receiver",
+            credential_name="default",
+            channels=[("telegram", "chat-123")],
+            msg_seq=1,
+        )
+    )
+
+    assert result is True
+    assert http.calls and http.calls[0]["url"].endswith(":25307/hooks/agent")
