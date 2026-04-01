@@ -33,9 +33,11 @@ import os
 import sys
 
 # 添加 utils 到路径
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "utils"))
+UTILS_DIR = os.path.join(os.path.dirname(__file__), "utils")
+if UTILS_DIR not in sys.path:
+    sys.path.insert(0, UTILS_DIR)
 
-from auth import create_authenticator
+from credential_store import create_authenticator
 from config import SDKConfig
 
 
@@ -43,8 +45,8 @@ async def check_email(args):
     """查看邮件"""
     config = SDKConfig()
 
-    # 获取 mail_service_url
-    mail_service_url = os.environ.get("E2E_MAIL_SERVICE_URL", "http://localhost:9899")
+    # 获取 mail_service_url（生产环境建议设置为 https://awiki.ai 或前端网关地址）
+    mail_service_url = os.environ.get("E2E_MAIL_SERVICE_URL", "https://awiki.ai")
 
     # 创建认证器（复用 awiki-agent-id-message 的 credential 体系）
     auth_result = create_authenticator(args.credential, config)

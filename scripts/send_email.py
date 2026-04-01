@@ -18,18 +18,22 @@ import os
 import sys
 
 # 添加 utils 到路径
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "utils"))
+UTILS_DIR = os.path.join(os.path.dirname(__file__), "utils")
+if UTILS_DIR not in sys.path:
+    sys.path.insert(0, UTILS_DIR)
 
-from auth import create_authenticator
+from credential_store import create_authenticator
 from config import SDKConfig
+from utils.rpc import authenticated_rpc_call
+from utils.client import create_user_service_client
 
 
 async def send_email(args):
-    """发送邮件"""
+    """发送邮件（通过 awiki-mail-service 的 mail.send RPC）。"""
     config = SDKConfig()
 
-    # 获取 mail_service_url（从环境变量或默认值）
-    mail_service_url = os.environ.get("E2E_MAIL_SERVICE_URL", "http://localhost:9899")
+    # 获取 mail_service_url（生产环境建议设置为 https://awiki.ai 或前端网关地址）
+    mail_service_url = os.environ.get("E2E_MAIL_SERVICE_URL", "https://awiki.ai")
 
     # 创建认证器（复用 awiki-agent-id-message 的 credential 体系）
     auth_result = create_authenticator(args.credential, config)
@@ -37,48 +41,36 @@ async def send_email(args):
         print(f"错误: 凭证 '{args.credential}' 不存在。请先运行 setup_identity.py", file=sys.stderr)
         sys.exit(1)
 
-    auth_header, identity_data = auth_result
+    auth, identity_data = auth_result
 
-    # 发送请求
+    # 构造 JSON-RPC 参数
+    params = {
+        "to": args.to,
+        "cc": args.cc or [],
+        "subject": args.subject,
+        "body_text": args.body,
+        "body_html": args.html,
+    }
+
+    # 发送请求（复用 authenticated_rpc_call + DIDWbaAuthHeader）
     import httpx
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        headers = {"Content-Type": "application/json"}
-
-        # 添加认证头
-        if auth_header:
-            for key, value in auth_header.items():
-                headers[key] = value
-
-        # 构造 JSON-RPC 请求
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "mail.send",
-            "params": {
-                "to": args.to,
-                "cc": args.cc or [],
-                "subject": args.subject,
-                "body_text": args.body,
-                "body_html": args.html,
-            },
-            "id": "cli-send-1",
-        }
-
-        resp = await client.post(f"{mail_service_url}/mail/rpc", json=payload, headers=headers)
-
-        if resp.status_code != 200:
-            print(f"错误: HTTP {resp.status_code}", file=sys.stderr)
-            print(resp.text, file=sys.stderr)
-            sys.exit(1)
-
-        result = resp.json()
-
-        if "error" in result:
-            print(f"错误: {result['error']}", file=sys.stderr)
+    async with httpx.AsyncClient(timeout=30, base_url=mail_service_url) as client:
+        try:
+            result = await authenticated_rpc_call(
+                client,
+                "/mail/rpc",
+                "mail.send",
+                params=params,
+                auth=auth,
+                credential_name=args.credential,
+            )
+        except Exception as e:
+            print(f"错误: 调用 mail.send 失败: {e}", file=sys.stderr)
             sys.exit(1)
 
         # 输出结果
-        print(json.dumps(result["result"], indent=2, ensure_ascii=False))
+        print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 def main():
