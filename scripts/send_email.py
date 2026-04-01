@@ -31,27 +31,13 @@ async def send_email(args):
     # 获取 mail_service_url（从环境变量或默认值）
     mail_service_url = os.environ.get("E2E_MAIL_SERVICE_URL", "http://localhost:9899")
 
-    # 创建认证器
+    # 创建认证器（复用 awiki-agent-id-message 的 credential 体系）
     auth_result = create_authenticator(args.credential, config)
     if auth_result is None:
         print(f"错误: 凭证 '{args.credential}' 不存在。请先运行 setup_identity.py", file=sys.stderr)
         sys.exit(1)
 
     auth_header, identity_data = auth_result
-
-    # 构造 JSON-RPC 请求
-    payload = {
-        "jsonrpc": "2.0",
-        "method": "mail.send",
-        "params": {
-            "to": args.to,
-            "cc": args.cc or [],
-            "subject": args.subject,
-            "body_text": args.body,
-            "body_html": args.html,
-        },
-        "id": "cli-send-1",
-    }
 
     # 发送请求
     import httpx
@@ -63,6 +49,20 @@ async def send_email(args):
         if auth_header:
             for key, value in auth_header.items():
                 headers[key] = value
+
+        # 构造 JSON-RPC 请求
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "mail.send",
+            "params": {
+                "to": args.to,
+                "cc": args.cc or [],
+                "subject": args.subject,
+                "body_text": args.body,
+                "body_html": args.html,
+            },
+            "id": "cli-send-1",
+        }
 
         resp = await client.post(f"{mail_service_url}/mail/rpc", json=payload, headers=headers)
 

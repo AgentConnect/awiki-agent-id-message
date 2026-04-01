@@ -20,6 +20,9 @@
     # 查看账户信息
     python check_email.py --account
 
+    # 下载附件
+    python check_email.py --download-attachment <message_id> --attachment-index 0 [--output 文件名]
+
 复用 awiki-agent-id-message 的 credential 体系。
 """
 
@@ -43,7 +46,7 @@ async def check_email(args):
     # 获取 mail_service_url
     mail_service_url = os.environ.get("E2E_MAIL_SERVICE_URL", "http://localhost:9899")
 
-    # 创建认证器
+    # 创建认证器（复用 awiki-agent-id-message 的 credential 体系）
     auth_result = create_authenticator(args.credential, config)
     if auth_result is None:
         print(f"错误: 凭证 '{args.credential}' 不存在", file=sys.stderr)
@@ -60,7 +63,18 @@ async def check_email(args):
                 headers[key] = value
 
         # 根据参数选择操作
-        if args.read:
+        if args.download_attachment:
+            # 下载附件
+            payload = {
+                "jsonrpc": "2.0",
+                "method": "mail.getAttachment",
+                "params": {
+                    "message_id": args.download_attachment,
+                    "attachment_index": args.attachment_index,
+                },
+                "id": "cli-attach-1",
+            }
+        elif args.read:
             # 查看邮件详情
             payload = {
                 "jsonrpc": "2.0",
@@ -115,7 +129,36 @@ async def check_email(args):
         data = result["result"]
 
         # 格式化输出
-        if args.read:
+        if args.download_attachment:
+            filename = data.get("filename") or f"attachment_{args.attachment_index}"
+            content_b64 = data.get("content_base64") or ""
+            content_type = data.get("content_type") or "application/octet-stream"
+            size = data.get("size") or 0
+
+            import base64
+            from pathlib import Path
+
+            try:
+                content = base64.b64decode(content_b64)
+            except Exception as e:
+                print(f"错误: 附件内容 base64 解码失败: {e}", file=sys.stderr)
+                sys.exit(1)
+
+            # 计算输出路径
+            if args.output:
+                out_path = Path(args.output)
+            else:
+                out_path = Path(filename)
+
+            try:
+                out_path.write_bytes(content)
+            except OSError as e:
+                print(f"错误: 写入附件文件失败: {e}", file=sys.stderr)
+                sys.exit(1)
+
+            print(f"附件已保存: {out_path} ({size} bytes, content-type={content_type})")
+
+        elif args.read:
             # 邮件详情
             print(f"发件人: {data['from_addr']}")
             if data.get("from_name"):
@@ -162,8 +205,31 @@ def main():
     parser.add_argument("--read", metavar="MESSAGE_ID", help="查看邮件详情")
     parser.add_argument("--mark-read", nargs="+", metavar="MESSAGE_ID", help="标记已读")
     parser.add_argument("--account", action="store_true", help="显示邮箱账户信息")
+    parser.add_argument(
+        "--download-attachment",
+        metavar="MESSAGE_ID",
+        help="下载指定邮件的附件（需配合 --attachment-index）",
+    )
+    parser.add_argument(
+        "--attachment-index",
+        type=int,
+        default=0,
+        help="要下载的附件索引（从 0 开始，默认 0）",
+    )
+    parser.add_argument(
+        "--output",
+        help="附件保存到的文件路径（默认使用服务端返回的文件名）",
+    )
     parser.add_argument("--credential", default="default", help="凭证名称（默认 default）")
     args = parser.parse_args()
+
+    # 简单参数校验
+    if args.download_attachment and args.mark_read:
+        print("错误: --download-attachment 和 --mark-read 不能同时使用", file=sys.stderr)
+        sys.exit(1)
+    if args.download_attachment and args.account:
+        print("错误: --download-attachment 和 --account 不能同时使用", file=sys.stderr)
+        sys.exit(1)
 
     asyncio.run(check_email(args))
 
