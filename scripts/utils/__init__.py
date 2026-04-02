@@ -22,7 +22,11 @@ from utils.auth import (
     get_jwt_via_wba,
     create_authenticated_identity,
 )
-from utils.client import create_user_service_client, create_molt_message_client
+from utils.client import (
+    create_mail_service_client,
+    create_molt_message_client,
+    create_user_service_client,
+)
 from utils.e2ee import E2eeClient
 from utils.rpc import JsonRpcError, rpc_call, authenticated_rpc_call
 from utils.handle import (
@@ -57,6 +61,7 @@ __all__ = [
     "get_jwt_via_wba",
     "create_authenticated_identity",
     # client
+    "create_mail_service_client",
     "create_user_service_client",
     "create_molt_message_client",
     # e2ee

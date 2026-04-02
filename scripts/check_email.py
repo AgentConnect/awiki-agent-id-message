@@ -39,6 +39,8 @@ if UTILS_DIR not in sys.path:
 
 from credential_store import create_authenticator
 from config import SDKConfig
+from utils import create_mail_service_client
+from utils.rpc import authenticated_rpc_call
 
 
 async def check_email(args):
@@ -54,81 +56,52 @@ async def check_email(args):
         print(f"错误: 凭证 '{args.credential}' 不存在", file=sys.stderr)
         sys.exit(1)
 
-    auth_header, identity_data = auth_result
+    auth, identity_data = auth_result
 
-    import httpx
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        headers = {"Content-Type": "application/json"}
-        if auth_header:
-            for key, value in auth_header.items():
-                headers[key] = value
-
+    async with create_mail_service_client(mail_service_url) as client:
         # 根据参数选择操作
         if args.download_attachment:
-            # 下载附件
-            payload = {
-                "jsonrpc": "2.0",
-                "method": "mail.getAttachment",
-                "params": {
-                    "message_id": args.download_attachment,
-                    "attachment_index": args.attachment_index,
-                },
-                "id": "cli-attach-1",
+            method = "mail.getAttachment"
+            params = {
+                "message_id": args.download_attachment,
+                "attachment_index": args.attachment_index,
             }
+            request_id = "cli-attach-1"
         elif args.read:
-            # 查看邮件详情
-            payload = {
-                "jsonrpc": "2.0",
-                "method": "mail.getMessage",
-                "params": {"message_id": args.read},
-                "id": "cli-get-1",
-            }
+            method = "mail.getMessage"
+            params = {"message_id": args.read}
+            request_id = "cli-get-1"
         elif args.mark_read:
-            # 标记已读
-            payload = {
-                "jsonrpc": "2.0",
-                "method": "mail.markRead",
-                "params": {"message_ids": args.mark_read, "is_read": True},
-                "id": "cli-mark-1",
-            }
+            method = "mail.markRead"
+            params = {"message_ids": args.mark_read, "is_read": True}
+            request_id = "cli-mark-1"
         elif args.account:
-            # 查看账户信息
-            payload = {
-                "jsonrpc": "2.0",
-                "method": "mail.getMailbox",
-                "params": {},
-                "id": "cli-account-1",
-            }
+            method = "mail.getMailbox"
+            params = {}
+            request_id = "cli-account-1"
         else:
-            # 列出邮件
+            method = "mail.getInbox"
             params = {
                 "folder": args.folder,
                 "limit": args.limit,
                 "offset": args.offset,
                 "unread_only": args.unread,
             }
-            payload = {
-                "jsonrpc": "2.0",
-                "method": "mail.getInbox",
-                "params": params,
-                "id": "cli-list-1",
-            }
+            request_id = "cli-list-1"
 
-        resp = await client.post(f"{mail_service_url}/mail/rpc", json=payload, headers=headers)
-
-        if resp.status_code != 200:
-            print(f"错误: HTTP {resp.status_code}", file=sys.stderr)
-            print(resp.text, file=sys.stderr)
+        try:
+            data = await authenticated_rpc_call(
+                client,
+                "/mail/rpc",
+                method,
+                params=params,
+                request_id=request_id,
+                auth=auth,
+                credential_name=args.credential,
+            )
+        except Exception as e:
+            print(f"错误: 调用 {method} 失败: {e}", file=sys.stderr)
             sys.exit(1)
-
-        result = resp.json()
-
-        if "error" in result:
-            print(f"错误: {result['error']}", file=sys.stderr)
-            sys.exit(1)
-
-        data = result["result"]
 
         # 格式化输出
         if args.download_attachment:

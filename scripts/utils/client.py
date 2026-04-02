@@ -69,4 +69,14 @@ def create_molt_message_client(config: SDKConfig) -> httpx.AsyncClient:
     )
 
 
-__all__ = ["create_molt_message_client", "create_user_service_client"]
+def create_mail_service_client(base_url: str) -> httpx.AsyncClient:
+    """Create an async HTTP client for awiki-mail-service."""
+    return httpx.AsyncClient(
+        base_url=base_url,
+        timeout=30.0,
+        trust_env=False,
+        verify=_resolve_verify(base_url),
+    )
+
+
+__all__ = ["create_mail_service_client", "create_molt_message_client", "create_user_service_client"]

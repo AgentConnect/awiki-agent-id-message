@@ -24,8 +24,8 @@ if UTILS_DIR not in sys.path:
 
 from credential_store import create_authenticator
 from config import SDKConfig
+from utils import create_mail_service_client
 from utils.rpc import authenticated_rpc_call
-from utils.client import create_user_service_client
 
 
 async def send_email(args):
@@ -53,9 +53,7 @@ async def send_email(args):
     }
 
     # 发送请求（复用 authenticated_rpc_call + DIDWbaAuthHeader）
-    import httpx
-
-    async with httpx.AsyncClient(timeout=30, base_url=mail_service_url) as client:
+    async with create_mail_service_client(mail_service_url) as client:
         try:
             result = await authenticated_rpc_call(
                 client,
